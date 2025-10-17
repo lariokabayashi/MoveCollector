@@ -5,12 +5,12 @@ import UniformTypeIdentifiers
 
 struct ContentView: View {
     @Environment(\.managedObjectContext) private var context
-    @StateObject private var motionManager: SensorManager
+    @StateObject private var sensorManager: SensorManagerViewModel
     @State private var isCollecting = false
     @State private var csvURL: URL?
     
     init(context: NSManagedObjectContext) {
-        _motionManager = StateObject(wrappedValue: SensorManager(context: context))
+        _sensorManager = StateObject(wrappedValue: SensorManagerViewModel(context: context))
     }
     
     var body: some View {
@@ -23,10 +23,10 @@ struct ContentView: View {
             
             VStack(alignment: .leading, spacing: 8) {
                 
-                Text("Acelerômetro: x: \(motionManager.accelX, specifier: "%.2f") y: \(motionManager.accelY, specifier: "%.2f") z: \(motionManager.accelZ, specifier: "%.2f")")
-                Text("Giroscópio: x: \(motionManager.gyroX, specifier: "%.2f") y: \(motionManager.gyroY, specifier: "%.2f") z: \(motionManager.gyroZ, specifier: "%.2f")")
-                Text("Magnetômetro: x: \(motionManager.magX, specifier: "%.2f") y: \(motionManager.magY, specifier: "%.2f") z: \(motionManager.magZ, specifier: "%.2f")")
-                Text("Bateria: \(Int(motionManager.batteryLevel * 100))%")
+                Text("Acelerômetro: x: \(sensorManager.accelX, specifier: "%.2f") y: \(sensorManager.accelY, specifier: "%.2f") z: \(sensorManager.accelZ, specifier: "%.2f")")
+                Text("Giroscópio: x: \(sensorManager.gyroX, specifier: "%.2f") y: \(sensorManager.gyroY, specifier: "%.2f") z: \(sensorManager.gyroZ, specifier: "%.2f")")
+                Text("Magnetômetro: x: \(sensorManager.magX, specifier: "%.2f") y: \(sensorManager.magY, specifier: "%.2f") z: \(sensorManager.magZ, specifier: "%.2f")")
+                Text("Bateria: \(Int(sensorManager.batteryLevel * 100))%")
             }
             .font(.system(.body, design: .monospaced))
             .padding()
@@ -35,10 +35,10 @@ struct ContentView: View {
             
             Button{
                 if isCollecting {
-                    motionManager.stopCollection()
-                    csvURL = motionManager.exportToCSV()
+                    sensorManager.stopBackgroundCollection()
+                    csvURL = sensorManager.exportToCSV()
                 } else {
-                    motionManager.setupBackgroundTask()
+                    sensorManager.setupBackgroundCollection()
                 }
                 isCollecting.toggle()
             }
