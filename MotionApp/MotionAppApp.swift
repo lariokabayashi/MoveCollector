@@ -9,8 +9,10 @@ import SwiftUI
 
 @main
 struct MotionAppApp: App {
-    let persistenceController = PersistenceController.shared
+    @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
+    let persistenceController = PersistenceController.shared
+    
     var body: some Scene {
         
         WindowGroup {
