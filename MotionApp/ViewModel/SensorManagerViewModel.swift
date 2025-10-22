@@ -49,6 +49,8 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
         motionManager.gyroUpdateInterval = appConstants.updateInterval
         motionManager.magnetometerUpdateInterval = appConstants.updateInterval
         
+        context.reset()
+        
         motionManager.startAccelerometerUpdates()
         motionManager.startGyroUpdates()
         motionManager.startDeviceMotionUpdates()
@@ -70,13 +72,22 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
         motionManager.stopMagnetometerUpdates()
         timer?.invalidate()
         
-        try? context.save()
-        context.reset()
+        let fetchRequest: NSFetchRequest<NSFetchRequestResult> = SensorReading.fetchRequest()
+        let deleteRequest = NSBatchDeleteRequest(fetchRequest: fetchRequest)
+            
+        do {
+            try context.execute(deleteRequest)
+            try context.save()
+            context.reset()
+        } catch {
+            print("Failed to clear Core Data: \(error.localizedDescription)")
+        }
     }
     
     private func collectData() {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
         let timestamp = formatter.string(from: Date())
         batteryLevel = UIDevice.current.batteryLevel
         
@@ -176,7 +187,7 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
             return nil
         }
         
-        let fileName = "sensor_data_\(Date().timeIntervalSince1970).csv"
+        let fileName = "sensor_data_\(Date()).csv"
 
         let documentDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         let fileURL = documentDirectory.appendingPathComponent(fileName)
