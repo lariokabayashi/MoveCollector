@@ -71,17 +71,6 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
         motionManager.stopDeviceMotionUpdates()
         motionManager.stopMagnetometerUpdates()
         timer?.invalidate()
-        
-        let fetchRequest: NSFetchRequest<NSFetchRequestResult> = SensorReading.fetchRequest()
-        let deleteRequest = NSBatchDeleteRequest(fetchRequest: fetchRequest)
-            
-        do {
-            try context.execute(deleteRequest)
-            try context.save()
-            context.reset()
-        } catch {
-            print("Failed to clear Core Data: \(error.localizedDescription)")
-        }
     }
     
     private func collectData() {
@@ -180,6 +169,18 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
         }
     }
     
+    private func deleteRequests(for context: NSManagedObjectContext){
+        let fetchRequest: NSFetchRequest<NSFetchRequestResult> = SensorReading.fetchRequest()
+        let deleteRequest = NSBatchDeleteRequest(fetchRequest: fetchRequest)
+        
+        do {
+            try context.execute(deleteRequest) // cleaning every remaining data
+            context.reset()
+        } catch {
+            print("Failed to delete sensor data: \(error.localizedDescription)")
+        }
+    }
+    
     func exportToCSV() -> URL? {
         let sensorData = fetchSensorData(context: context, batchSize: 1000)
         guard !sensorData.isEmpty else {
@@ -187,7 +188,7 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
             return nil
         }
         
-        let fileName = "sensor_data_\(Date()).csv"
+        let fileName = "sensor_data_\(Date().timeIntervalSince1970).csv"
 
         let documentDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         let fileURL = documentDirectory.appendingPathComponent(fileName)
@@ -202,6 +203,8 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
                        "\(reading.pitch),\(reading.roll),\(reading.yaw),\(reading.battery)\n"
             csvText.append(line)
         }
+        
+        deleteRequests(for: context)
         
         do {
             try csvText.write(to: fileURL, atomically: true, encoding: .utf8)
