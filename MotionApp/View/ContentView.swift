@@ -3,15 +3,12 @@ import CoreData
 import CoreMotion
 import UniformTypeIdentifiers
 
+@available(iOS 26.0, *)
 struct ContentView: View {
+    @ObservedObject var sensorManager: SensorManagerViewModel
     @Environment(\.managedObjectContext) private var context
-    @StateObject private var sensorManager: SensorManagerViewModel
-    @State private var isCollecting = false
+    @State private var isUserStopped = false
     @State private var csvURL: URL?
-    
-    init(context: NSManagedObjectContext) {
-        _sensorManager = StateObject(wrappedValue: SensorManagerViewModel(context: context))
-    }
     
     var body: some View {
         VStack(spacing: 40) {
@@ -25,7 +22,6 @@ struct ContentView: View {
                 
                 Text("Acelerômetro: x: \(sensorManager.accelX, specifier: "%.2f") y: \(sensorManager.accelY, specifier: "%.2f") z: \(sensorManager.accelZ, specifier: "%.2f")")
                 Text("Giroscópio: x: \(sensorManager.gyroX, specifier: "%.2f") y: \(sensorManager.gyroY, specifier: "%.2f") z: \(sensorManager.gyroZ, specifier: "%.2f")")
-                Text("Magnetômetro: x: \(sensorManager.magX, specifier: "%.2f") y: \(sensorManager.magY, specifier: "%.2f") z: \(sensorManager.magZ, specifier: "%.2f")")
                 Text("Bateria: \(Int(sensorManager.batteryLevel * 100))%")
             }
             .font(.system(.body, design: .monospaced))
@@ -33,19 +29,21 @@ struct ContentView: View {
             .background(Color(.secondarySystemBackground))
             .cornerRadius(12)
             
-            Button{
-                if isCollecting {
-                    sensorManager.stopBackgroundCollection()
+            Button {
+                isUserStopped.toggle()
+                if isUserStopped {
                     csvURL = sensorManager.exportToCSV()
-                } else {
-                    sensorManager.setupBackgroundCollection()
+                    sensorManager.requestStopBackgroundCollection()
+                }else{
+                    sensorManager.submitBackgroundCollection()
                 }
-                isCollecting.toggle()
-            }
-            label: {
-                isCollecting ? Text("Stop").font(.title).foregroundStyle(.red) : Text("Start").font(.title).foregroundStyle(.blue)
-            }
-            .buttonStyle(.plain)
+           } label: {
+               isUserStopped
+                   ? Text("Start").font(.title).foregroundStyle(.blue)
+                   : Text("Stop").font(.title).foregroundStyle(.red)
+           }
+           .buttonStyle(.plain)
+           
             
             if let csvURL = csvURL {
                 ShareLink(

@@ -9,15 +9,15 @@ import SwiftUI
 import CoreMotion
 import UniformTypeIdentifiers
 import CoreData
-import BackgroundTasks
 
+@available(iOS 26.0, *)
 final class SensorManagerViewModel: NSObject, ObservableObject {
     private let motionManager = CMMotionManager()
     private let context: NSManagedObjectContext
     private let queue = OperationQueue()
+    weak var appDelegate: AppDelegate?
     private let appConstants = AppConstants()
-    private var appDelegate: AppDelegate?
-    private var timer: Timer?
+    private var collectionTimer: DispatchSourceTimer?
     private var saveCounter = 0
     
     init(context: NSManagedObjectContext) {
@@ -35,10 +35,6 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
     @Published var gyroY = 0.0
     @Published var gyroZ = 0.0
     
-    @Published var magX = 0.0
-    @Published var magY = 0.0
-    @Published var magZ = 0.0
-    
     @Published var batteryLevel: Float = UIDevice.current.batteryLevel
     
     var dataBuffer: [String] = []
@@ -47,30 +43,42 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
         motionManager.deviceMotionUpdateInterval = appConstants.updateInterval
         motionManager.accelerometerUpdateInterval = appConstants.updateInterval
         motionManager.gyroUpdateInterval = appConstants.updateInterval
-        motionManager.magnetometerUpdateInterval = appConstants.updateInterval
         
         context.reset()
         
         motionManager.startAccelerometerUpdates()
         motionManager.startGyroUpdates()
         motionManager.startDeviceMotionUpdates()
-        motionManager.startMagnetometerUpdates()
         
-        timer = Timer.scheduledTimer(withTimeInterval: appConstants.updateInterval, repeats: true) { _ in
-            self.collectData()
-        }
+        startBackgroundTimer()
         
         dataBuffer = ["Source,When,X,Y,Z,UA_X,UA_Y,UA_Z,Pitch,Roll,Yaw,Battery"]
     }
     
+    private func startBackgroundTimer() {
+        collectionTimer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .background))
+        collectionTimer?.schedule(deadline: .now(), repeating: appConstants.updateInterval)
+        collectionTimer?.setEventHandler { [weak self] in
+            self?.collectData()
+        }
+        collectionTimer?.resume()
+    }
+    
     func stopCollection() {
-        isRecording = false
+        collectionTimer?.cancel()
+        collectionTimer = nil
         
         motionManager.stopAccelerometerUpdates()
         motionManager.stopGyroUpdates()
         motionManager.stopDeviceMotionUpdates()
-        motionManager.stopMagnetometerUpdates()
-        timer?.invalidate()
+    }
+    
+    func requestStopBackgroundCollection() {
+        appDelegate?.stopBackgroundCollection()
+    }
+    
+    func submitBackgroundCollection() {
+        appDelegate?.submitBackgroundCollection()
     }
     
     private func collectData() {
@@ -78,13 +86,16 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
         let timestamp = formatter.string(from: Date())
-        batteryLevel = UIDevice.current.batteryLevel
-        
+        DispatchQueue.main.async {
+            self.batteryLevel = UIDevice.current.batteryLevel
+        }
         // Accelerometer
         if let accel = motionManager.accelerometerData {
-            accelX = accel.acceleration.x
-            accelY = accel.acceleration.y
-            accelZ = accel.acceleration.z
+            DispatchQueue.main.async {
+                self.accelX = accel.acceleration.x
+                self.accelY = accel.acceleration.y
+                self.accelZ = accel.acceleration.z
+            }
             let csvLine = "A,\(timestamp),\(accelX),\(accelY),\(accelZ),,,,,,\(batteryLevel)"
             dataBuffer.append(csvLine)
             saveReading(timestamp: timestamp, source: "A", x: accelX, y: accelY, z: accelZ)
@@ -92,22 +103,14 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
         
         // Gyroscope
         if let gyro = motionManager.gyroData {
-            gyroX = gyro.rotationRate.x
-            gyroY = gyro.rotationRate.y
-            gyroZ = gyro.rotationRate.z
+            DispatchQueue.main.async {
+                self.gyroX = gyro.rotationRate.x
+                self.gyroY = gyro.rotationRate.y
+                self.gyroZ = gyro.rotationRate.z
+            }
             let csvLine = "G,\(timestamp),\(gyroX),\(gyroY),\(gyroZ),,,,,,\(batteryLevel)"
             dataBuffer.append(csvLine)
             saveReading(timestamp: timestamp, source: "G", x: gyroX, y: gyroY, z: gyroZ)
-        }
-        
-        // Magnetometer
-        if let mag = motionManager.magnetometerData {
-            magX = mag.magneticField.x
-            magY = mag.magneticField.y
-            magZ = mag.magneticField.z
-            let csvLine = "M,\(timestamp),\(magX),\(magY),\(magZ),,,,,,\(batteryLevel)"
-            dataBuffer.append(csvLine)
-            saveReading(timestamp: timestamp, source: "M", x: magX, y: magY, z: magZ)
         }
         
         if let motion = motionManager.deviceMotion {
@@ -151,6 +154,8 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
                     print("Core Data save error: \(error.localizedDescription)")
                 }
             }
+            
+            print("[DEBUG] Timestamp: \(timestamp), State: \(UIApplication.shared.applicationState.rawValue), Battery: \(UIDevice.current.batteryLevel)")
         }
     }
     
@@ -215,16 +220,4 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
             return nil
         }
     }
-    
-    func setupBackgroundCollection() {
-        print("Background task started")
-        self.startCollection()
-        appDelegate?.scheduleBackgroundCollection()
-    }
-    
-    func stopBackgroundCollection() {
-        appDelegate?.cancelAllBackgroundTasks()
-        self.stopCollection()
-    }
-
 }
