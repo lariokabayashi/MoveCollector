@@ -7,6 +7,7 @@
 
 import SwiftUI
 
+@available(iOS 26.0, *)
 @main
 struct MotionAppApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
@@ -16,7 +17,7 @@ struct MotionAppApp: App {
     var body: some Scene {
         
         WindowGroup {
-            ContentView(context: persistenceController.container.viewContext)
+            ContentView(sensorManager: appDelegate.sensorManager)
                 .environment(\.managedObjectContext, persistenceController.container.viewContext)
         }
     }
