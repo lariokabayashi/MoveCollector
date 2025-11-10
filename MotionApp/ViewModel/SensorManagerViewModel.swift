@@ -9,6 +9,7 @@ import SwiftUI
 import CoreMotion
 import UniformTypeIdentifiers
 import CoreData
+import CoreLocation
 
 @available(iOS 26.0, *)
 final class SensorManagerViewModel: NSObject, ObservableObject {
@@ -40,6 +41,7 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
     var dataBuffer: [String] = []
     
     func startCollection() {
+        
         motionManager.deviceMotionUpdateInterval = appConstants.updateInterval
         motionManager.accelerometerUpdateInterval = appConstants.updateInterval
         motionManager.gyroUpdateInterval = appConstants.updateInterval
