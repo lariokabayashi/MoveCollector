@@ -36,6 +36,7 @@ struct ContentView: View {
                     sensorManager.requestStopBackgroundCollection()
                 }else{
                     sensorManager.submitBackgroundCollection()
+                    
                 }
            } label: {
                isUserStopped

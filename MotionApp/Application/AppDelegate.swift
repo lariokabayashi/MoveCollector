@@ -6,6 +6,7 @@ import SwiftUI
 @available(iOS 26.0, *)
 class AppDelegate: UIResponder, UIApplicationDelegate, ObservableObject {
     private let appConstants = AppConstants()
+    private let locationManager = LocationManager()
     private let scheduler = BGTaskScheduler.shared
     private var submitted = false
     
@@ -23,6 +24,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate, ObservableObject {
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
         requestNotificationPermission()
+        locationManager.startCollection()
         registerBackgroundCollection()
         submitBackgroundCollection()
         return true
@@ -53,7 +55,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate, ObservableObject {
         let identifier = appConstants.backgroundTaskIdentifier
 
         // Check for existing requests
-        BGTaskScheduler.shared.getPendingTaskRequests { requests in
+        scheduler.getPendingTaskRequests { requests in
             if requests.contains(where: { $0.identifier == identifier }) {
                 notify("Background task already scheduled. Skipping new submission.")
                 return
@@ -66,10 +68,6 @@ class AppDelegate: UIResponder, UIApplicationDelegate, ObservableObject {
             )
 
             request.strategy = .fail
-            
-            if BGTaskScheduler.supportedResources.contains(.gpu) {
-                request.requiredResources = .gpu
-            }
 
             do {
                 try self.scheduler.submit(request)
@@ -88,12 +86,14 @@ class AppDelegate: UIResponder, UIApplicationDelegate, ObservableObject {
         
         // Expiration = system ended early
         task.expirationHandler = { [weak self] in
-           guard let self else { return }
-           notify("Background task expired — system ended it.")
-           wasExpired = true
-           self.sensorManager.stopCollection()
-           task.setTaskCompleted(success: false)
-           self.currentTask = nil
+            guard let self else { return }
+            notify("Background task expired, system ended it")
+            wasExpired = true
+            self.sensorManager.stopCollection()
+            task.setTaskCompleted(success: false)
+            self.currentTask = nil
+            scheduler.cancelAllTaskRequests()
+            BGContinuedProcessingTask.cancelPreviousPerformRequests(withTarget: appConstants.backgroundTaskIdentifier)
         }
         
         // Start collecting data
@@ -101,9 +101,9 @@ class AppDelegate: UIResponder, UIApplicationDelegate, ObservableObject {
         
         // Keep updating progress just to keep iOS aware the task is alive
         let progress = task.progress
-        progress.totalUnitCount = .max // indefinite
+        progress.totalUnitCount = appConstants.totalTime // 30 min
         DispatchQueue.global(qos: .background).async {
-            while !self.isUserStopped && !wasExpired {
+            while !self.isUserStopped && !wasExpired && !progress.isFinished {
                 progress.completedUnitCount += 1
                 task.updateTitle("Collecting Data", subtitle: "Running...")
                 sleep(1)
@@ -118,11 +118,13 @@ class AppDelegate: UIResponder, UIApplicationDelegate, ObservableObject {
         }
 
         notify("Stopping background collection manually.")
-        task.setTaskCompleted(success: isUserStopped)
+        locationManager.stopCollection()
         isUserStopped = true
+        task.setTaskCompleted(success: isUserStopped)
         sensorManager.stopCollection()
         currentTask = nil
-        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: appConstants.backgroundTaskIdentifier)
+        scheduler.cancelAllTaskRequests()
+        BGContinuedProcessingTask.cancelPreviousPerformRequests(withTarget: appConstants.backgroundTaskIdentifier)
     }
 }
     
