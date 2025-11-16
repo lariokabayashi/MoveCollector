@@ -19,6 +19,17 @@ struct MotionAppApp: App {
         WindowGroup {
             ContentView(sensorManager: appDelegate.sensorManager)
                 .environment(\.managedObjectContext, persistenceController.container.viewContext)
+                .preferredColorScheme(.light)
         }
+    }
+}
+
+extension View {
+    func getWidth() -> CGFloat {
+        return UIScreen.main.bounds.width
+    }
+    
+    func getHeight() -> CGFloat {
+        return UIScreen.main.bounds.height
     }
 }
