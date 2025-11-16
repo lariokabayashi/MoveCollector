@@ -9,7 +9,6 @@ import SwiftUI
 import CoreMotion
 import UniformTypeIdentifiers
 import CoreData
-import BackgroundTasks
 
 struct SensorData {
     let source: String       // "A", "G", "M", or "D"

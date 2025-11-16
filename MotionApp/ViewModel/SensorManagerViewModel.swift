@@ -215,10 +215,10 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
         
         do {
             try csvText.write(to: fileURL, atomically: true, encoding: .utf8)
-            print("CSV file saved to: \(fileURL)")
+            notify("CSV file saved to: \(fileURL)")
             return fileURL
         } catch {
-            print("Failed to write CSV file: \(error)")
+            notify("Failed to write CSV file: \(error)")
             return nil
         }
     }
