@@ -6,6 +6,23 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXContainerItemProxy section */
+		05E61FD82EC9F6E20027C95D /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 0568E3712E95412100A25A5B /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 0568E3782E95412100A25A5B;
+			remoteInfo = MotionApp;
+		};
+		05E61FE72EC9F7240027C95D /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 0568E3712E95412100A25A5B /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 0568E3782E95412100A25A5B;
+			remoteInfo = MotionApp;
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXCopyFilesBuildPhase section */
 		05E61FB62EC9EAC40027C95D /* Embed Watch Content */ = {
 			isa = PBXCopyFilesBuildPhase;
@@ -21,6 +38,8 @@
 
 /* Begin PBXFileReference section */
 		0568E3792E95412100A25A5B /* MotionApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MotionApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		05E61FD42EC9F6E20027C95D /* UnitTest.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = UnitTest.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		05E61FE12EC9F7240027C95D /* UITest.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = UITest.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -42,10 +61,34 @@
 			path = MotionApp;
 			sourceTree = "<group>";
 		};
+		05E61FD52EC9F6E20027C95D /* UnitTest */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = UnitTest;
+			sourceTree = "<group>";
+		};
+		05E61FE22EC9F7240027C95D /* UITest */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = UITest;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		0568E3762E95412100A25A5B /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		05E61FD12EC9F6E20027C95D /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		05E61FDE2EC9F7240027C95D /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -59,6 +102,8 @@
 			isa = PBXGroup;
 			children = (
 				0568E37B2E95412100A25A5B /* MotionApp */,
+				05E61FD52EC9F6E20027C95D /* UnitTest */,
+				05E61FE22EC9F7240027C95D /* UITest */,
 				0568E37A2E95412100A25A5B /* Products */,
 			);
 			sourceTree = "<group>";
@@ -67,6 +112,8 @@
 			isa = PBXGroup;
 			children = (
 				0568E3792E95412100A25A5B /* MotionApp.app */,
+				05E61FD42EC9F6E20027C95D /* UnitTest.xctest */,
+				05E61FE12EC9F7240027C95D /* UITest.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -97,6 +144,52 @@
 			productReference = 0568E3792E95412100A25A5B /* MotionApp.app */;
 			productType = "com.apple.product-type.application";
 		};
+		05E61FD32EC9F6E20027C95D /* UnitTest */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 05E61FDA2EC9F6E20027C95D /* Build configuration list for PBXNativeTarget "UnitTest" */;
+			buildPhases = (
+				05E61FD02EC9F6E20027C95D /* Sources */,
+				05E61FD12EC9F6E20027C95D /* Frameworks */,
+				05E61FD22EC9F6E20027C95D /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				05E61FD92EC9F6E20027C95D /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				05E61FD52EC9F6E20027C95D /* UnitTest */,
+			);
+			name = UnitTest;
+			packageProductDependencies = (
+			);
+			productName = UnitTest;
+			productReference = 05E61FD42EC9F6E20027C95D /* UnitTest.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		05E61FE02EC9F7240027C95D /* UITest */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 05E61FE92EC9F7240027C95D /* Build configuration list for PBXNativeTarget "UITest" */;
+			buildPhases = (
+				05E61FDD2EC9F7240027C95D /* Sources */,
+				05E61FDE2EC9F7240027C95D /* Frameworks */,
+				05E61FDF2EC9F7240027C95D /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				05E61FE82EC9F7240027C95D /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				05E61FE22EC9F7240027C95D /* UITest */,
+			);
+			name = UITest;
+			packageProductDependencies = (
+			);
+			productName = UITest;
+			productReference = 05E61FE12EC9F7240027C95D /* UITest.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -109,6 +202,14 @@
 				TargetAttributes = {
 					0568E3782E95412100A25A5B = {
 						CreatedOnToolsVersion = 16.2;
+					};
+					05E61FD32EC9F6E20027C95D = {
+						CreatedOnToolsVersion = 26.1;
+						TestTargetID = 0568E3782E95412100A25A5B;
+					};
+					05E61FE02EC9F7240027C95D = {
+						CreatedOnToolsVersion = 26.1;
+						TestTargetID = 0568E3782E95412100A25A5B;
 					};
 				};
 			};
@@ -127,12 +228,28 @@
 			projectRoot = "";
 			targets = (
 				0568E3782E95412100A25A5B /* MotionApp */,
+				05E61FD32EC9F6E20027C95D /* UnitTest */,
+				05E61FE02EC9F7240027C95D /* UITest */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		0568E3772E95412100A25A5B /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		05E61FD22EC9F6E20027C95D /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		05E61FDF2EC9F7240027C95D /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -149,7 +266,34 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		05E61FD02EC9F6E20027C95D /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		05E61FDD2EC9F7240027C95D /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		05E61FD92EC9F6E20027C95D /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 0568E3782E95412100A25A5B /* MotionApp */;
+			targetProxy = 05E61FD82EC9F6E20027C95D /* PBXContainerItemProxy */;
+		};
+		05E61FE82EC9F7240027C95D /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 0568E3782E95412100A25A5B /* MotionApp */;
+			targetProxy = 05E61FE72EC9F7240027C95D /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		0568E38E2E95412200A25A5B /* Debug */ = {
@@ -166,11 +310,13 @@
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = MotionApp/Info.plist;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.healthcare-fitness";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.1;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -178,6 +324,10 @@
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.LarissaOkabayashi.MoveCollector;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -198,11 +348,13 @@
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = MotionApp/Info.plist;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.healthcare-fitness";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.1;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -210,6 +362,10 @@
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.LarissaOkabayashi.MoveCollector;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -339,6 +495,108 @@
 			};
 			name = Release;
 		};
+		05E61FDB2EC9F6E20027C95D /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = QS932KTLCZ;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.1;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.LarissaOkabayashi.UnitTest;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/MotionApp.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/MotionApp";
+			};
+			name = Debug;
+		};
+		05E61FDC2EC9F6E20027C95D /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = QS932KTLCZ;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.1;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.LarissaOkabayashi.UnitTest;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/MotionApp.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/MotionApp";
+			};
+			name = Release;
+		};
+		05E61FEA2EC9F7240027C95D /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = QS932KTLCZ;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.1;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.LarissaOkabayashi.UITest;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = MotionApp;
+			};
+			name = Debug;
+		};
+		05E61FEB2EC9F7240027C95D /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = QS932KTLCZ;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.1;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.LarissaOkabayashi.UITest;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = MotionApp;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -356,6 +614,24 @@
 			buildConfigurations = (
 				0568E38E2E95412200A25A5B /* Debug */,
 				0568E38F2E95412200A25A5B /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		05E61FDA2EC9F6E20027C95D /* Build configuration list for PBXNativeTarget "UnitTest" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				05E61FDB2EC9F6E20027C95D /* Debug */,
+				05E61FDC2EC9F6E20027C95D /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		05E61FE92EC9F7240027C95D /* Build configuration list for PBXNativeTarget "UITest" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				05E61FEA2EC9F7240027C95D /* Debug */,
+				05E61FEB2EC9F7240027C95D /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
