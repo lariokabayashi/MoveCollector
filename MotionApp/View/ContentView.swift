@@ -19,13 +19,12 @@ struct ContentView: View {
                 .font(.title2)
                 .bold()
             
-            Spacer()
-            
             HStack(spacing: 16){
                 VStack {
                     Text("\(Date().timeIntervalSince(startTime), specifier: "%.2f") s")
                         .font(.system(size: 32, weight: .bold))
                         .foregroundColor(.black)
+                        .accessibilityIdentifier("DurationTimerLabel")
                     
                     Text("Duration")
                         .font(.subheadline)
@@ -70,10 +69,12 @@ struct ContentView: View {
                             Text("\(sensorManager.accelX, specifier: "%.2f")")
                                 .font(.system(size: 32, weight: .bold))
                                 .foregroundColor(.black)
+                                .accessibilityIdentifier("AccelXLabel")
                             Text("m/sˆ2")
                                 .font(.subheadline)
                                 .foregroundColor(.gray)
                         }
+                        
                         VStack{
                             Text("Y")
                                 .font(.subheadline)
@@ -119,7 +120,7 @@ struct ContentView: View {
                                 Text("\(sensorManager.gyroX, specifier: "%.2f")")
                                     .font(.system(size: 32, weight: .bold))
                                     .foregroundColor(.black)
-                                Text("∘/s")
+                                Text("rad/s")
                                     .font(.subheadline)
                                     .foregroundColor(.gray)
                             }
@@ -130,7 +131,7 @@ struct ContentView: View {
                                 Text("\(sensorManager.gyroY, specifier: "%.2f")")
                                     .font(.system(size: 32, weight: .bold))
                                     .foregroundColor(.black)
-                                Text("∘/s")
+                                Text("rad/s")
                                     .font(.subheadline)
                                     .foregroundColor(.gray)
                             }
@@ -141,7 +142,7 @@ struct ContentView: View {
                                 Text("\(sensorManager.gyroZ, specifier: "%.2f")")
                                     .font(.system(size: 32, weight: .bold))
                                     .foregroundColor(.black)
-                                Text("∘/s")
+                                Text("rad/s")
                                     .font(.subheadline)
                                     .foregroundColor(.gray)
                             }
@@ -156,6 +157,20 @@ struct ContentView: View {
                     .shadow(color: .black.opacity(0.2), radius: 8, x: 0, y: 4)
                 }
             }
+            VStack{
+                Text("Predicted Activity: ")
+                    .font(.subheadline)
+                    .foregroundColor(.gray)
+                Text("\(sensorManager.predictedActivity)")
+                    .font(.title)
+            }
+            .padding()
+            .frame(maxWidth: .infinity)
+            .background(
+                RoundedRectangle(cornerRadius: 20)
+                    .fill(appConstants.backgroundColor)
+            )
+            .shadow(color: .black.opacity(0.2), radius: 8, x: 0, y: 4)
             
             Button {
                 isUserStopped.toggle()
@@ -178,19 +193,8 @@ struct ContentView: View {
                     .fill(appConstants.backgroundColor)
             )
             .shadow(color: .black.opacity(0.2), radius: 8, x: 0, y: 4)
+            .accessibilityIdentifier("StartStopButton")
             
-//            if let csvURL = csvURL {
-//                ShareLink(
-//                    item: csvURL,
-//                    preview: SharePreview("Sensor Data", image: Image(systemName: "square.and.arrow.up"))
-//                ) {
-//                    Image(systemName: "square.and.arrow.up")
-//                        .resizable()
-//                        .frame(width: 30, height: 40)
-//                }
-//            }
-            
-            Spacer()
         }
         .padding()
     }

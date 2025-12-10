@@ -10,6 +10,7 @@ import CoreMotion
 import UniformTypeIdentifiers
 import CoreData
 import CoreLocation
+import CoreML
 
 @available(iOS 26.0, *)
 final class SensorManagerViewModel: NSObject, ObservableObject {
@@ -20,6 +21,15 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
     private let appConstants = AppConstants()
     private var collectionTimer: DispatchSourceTimer?
     private var saveCounter = 0
+    
+    // MARK: - ML Model (ConvNet)
+    private let convNet = try! ConvNet_DynamicBatch()
+    private var mlBuffer: [[Double]] = []      // sliding window buffer
+    private let windowSize = 60                // 3 sec @ 20 Hz
+    
+    @Published var predictedActivity: String = ""
+    
+    var CLASS_EMOJI = ["sit 🪑", "stand 🧍", "walk 🚶", "climb up 🪜⬆️", "climb down 🪜⬇️", "run 🏃"]
     
     init(context: NSManagedObjectContext) {
         self.context = context
@@ -38,8 +48,6 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
     
     @Published var batteryLevel: Float = UIDevice.current.batteryLevel
     
-    var dataBuffer: [String] = []
-    
     func startCollection() {
         
         motionManager.deviceMotionUpdateInterval = appConstants.updateInterval
@@ -53,8 +61,6 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
         motionManager.startDeviceMotionUpdates()
         
         startBackgroundTimer()
-        
-        dataBuffer = ["Source,When,X,Y,Z,UA_X,UA_Y,UA_Z,Pitch,Roll,Yaw,Battery"]
     }
     
     private func startBackgroundTimer() {
@@ -83,74 +89,125 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
         appDelegate?.submitBackgroundCollection()
     }
     
+    private func argmax(_ arr: MLShapedArray<Float>) -> Int {
+        var bestIndex = 0
+        var bestValue = Float.leastNormalMagnitude
+
+        for i in 0..<arr.shape[1] {
+            let slice = arr[0, i]       
+            let value = slice.scalar
+            
+            if value! > bestValue {
+                bestValue = value!
+                bestIndex = i
+            }
+        }
+        return bestIndex
+    }
+    
+    private func runHARPrediction() {
+        guard let input = prepareMLMultiArray() else { return }
+        print(input)
+
+        do {
+            let output = try convNet.prediction(input: input)
+            let probs = output.var_53ShapedArray
+            let predictedIndex = argmax(probs)
+            
+            DispatchQueue.main.async {
+                self.predictedActivity = self.CLASS_EMOJI[predictedIndex]
+            }
+            
+        } catch {
+            print("HAR Prediction Error:", error)
+        }
+    }
+    
+    private func prepareMLMultiArray() -> MLMultiArray? {
+        let shape: [NSNumber] = [1, 6, 60]
+        guard let array = try? MLMultiArray(shape: shape, dataType: .float32) else { return nil }
+        
+        for t in 0..<windowSize {
+            let sample = mlBuffer[t]   // [ax, ay, az, gx, gy, gz]
+            
+            for (index, element) in sample.enumerated() {
+                array[[0, index, t] as [NSNumber]] = NSNumber(value: element)
+                print("array value at \(index):\(NSNumber(value: element))")
+            }
+//            for c in 0..<6 {
+//                let value = Float(sample[c])
+//                array[[0, c, t] as [NSNumber]] = value as NSNumber
+//                print("array value at \(c):\(array[c])")
+//            }
+        }
+        return array
+    }
+    
+    private func appendToMLBuffer(ax: Double, ay: Double, az: Double,
+                                  gx: Double, gy: Double, gz: Double) {
+        
+        let sample = [ax, ay, az, gx, gy, gz]
+        mlBuffer.append(sample)
+        
+        if mlBuffer.count > windowSize {
+            mlBuffer.removeFirst()
+        }
+        
+        if mlBuffer.count == windowSize {
+            runHARPrediction()
+        }
+    }
+    
     private func collectData() {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
         let timestamp = formatter.string(from: Date())
-        DispatchQueue.main.async {
-            self.batteryLevel = UIDevice.current.batteryLevel
-        }
-        // Accelerometer
-        if let accel = motionManager.accelerometerData {
+        if let accel = motionManager.deviceMotion?.userAcceleration, // shows the acceleration without the gravity force
+           let gyro  = motionManager.gyroData {
+            
             DispatchQueue.main.async {
-                self.accelX = accel.acceleration.x
-                self.accelY = accel.acceleration.y
-                self.accelZ = accel.acceleration.z
-            }
-            let csvLine = "A,\(timestamp),\(accelX),\(accelY),\(accelZ),,,,,,\(batteryLevel)"
-            dataBuffer.append(csvLine)
-            saveReading(timestamp: timestamp, source: "A", x: accelX, y: accelY, z: accelZ)
-        }
-        
-        // Gyroscope
-        if let gyro = motionManager.gyroData {
-            DispatchQueue.main.async {
+                self.accelX = accel.x * 10
+                self.accelY = accel.y * 10
+                self.accelZ = accel.z * 10
                 self.gyroX = gyro.rotationRate.x
                 self.gyroY = gyro.rotationRate.y
                 self.gyroZ = gyro.rotationRate.z
+                self.batteryLevel = UIDevice.current.batteryLevel
+                
+                // ---- ML HAR Pipeline ----------------------------
+                self.appendToMLBuffer(
+                    ax: self.accelX,
+                    ay: self.accelY,
+                    az: self.accelZ,
+                    gx: self.gyroX,
+                    gy: self.gyroY,
+                    gz: self.gyroZ
+                )
             }
-            let csvLine = "G,\(timestamp),\(gyroX),\(gyroY),\(gyroZ),,,,,,\(batteryLevel)"
-            dataBuffer.append(csvLine)
-            saveReading(timestamp: timestamp, source: "G", x: gyroX, y: gyroY, z: gyroZ)
         }
-        
-        if let motion = motionManager.deviceMotion {
-            let rot = motion.rotationRate
-            let ua = motion.userAcceleration
-            let att = motion.attitude
-            let csvLine = "D,\(timestamp),\(rot.x),\(rot.y),\(rot.z),\(ua.x),\(ua.y),\(ua.z),\(att.pitch),\(att.roll),\(att.yaw),\(batteryLevel)"
-            dataBuffer.append(csvLine)
-            saveReading(timestamp: timestamp, source: "D", x: rot.x, y: rot.y, z: rot.z,
-                       uaX: ua.x, uaY: ua.y, uaZ: ua.z,
-                       pitch: att.pitch, roll: att.roll, yaw: att.yaw)
-        }
+
+        saveReading(timestamp: timestamp, ax: accelX, ay: accelY, az: accelZ, gx: gyroX, gy: gyroY, gz: gyroZ, battery: Double(batteryLevel))
+
     }
     
-    private func saveReading(timestamp: String, source: String, x: Double, y: Double, z: Double,
-                             uaX: Double? = nil, uaY: Double? = nil, uaZ: Double? = nil,
-                             pitch: Double? = nil, roll: Double? = nil, yaw: Double? = nil) {
+    private func saveReading(timestamp: String, ax: Double, ay: Double, az: Double, gx: Double, gy: Double, gz: Double, battery: Double) {
         context.perform {
             let reading = SensorReading(context: self.context)
             reading.id = UUID()
-            reading.source = source
             reading.timestamp = timestamp
-            reading.x = x
-            reading.y = y
-            reading.z = z
-            reading.uaX = uaX ?? 0
-            reading.uaY = uaY ?? 0
-            reading.uaZ = uaZ ?? 0
-            reading.pitch = pitch ?? 0
-            reading.roll = roll ?? 0
-            reading.yaw = yaw ?? 0
-            reading.battery = Double(UIDevice.current.batteryLevel)
+            reading.ax = ax
+            reading.ay = ay
+            reading.az = az
+            reading.gx = gx
+            reading.gy = gy
+            reading.gz = gz
+            reading.battery = battery
             
             self.saveCounter += 1
             if self.saveCounter >= self.appConstants.saveThreshold {
                 do {
                     try self.context.save()
-                    self.dataBuffer.removeAll(keepingCapacity: true)
                     self.saveCounter = 0
                 } catch {
                     print("Core Data save error: \(error.localizedDescription)")
@@ -200,14 +257,12 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
         let documentDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         let fileURL = documentDirectory.appendingPathComponent(fileName)
         
-        var csvText = "timestamp,source,x,y,z,uaX,uaY,uaZ,pitch,roll,yaw,battery\n"
+        var csvText = "timestamp,ax,ay,az,gx,gy,gz,battery\n"
 
         for reading in sensorData {
             let timestamp = reading.timestamp ?? ""
-            let source = reading.source ?? ""
-            let line = "\(timestamp),\(source),\(reading.x),\(reading.y),\(reading.z)," +
-                       "\(reading.uaX),\(reading.uaY),\(reading.uaZ)," +
-                       "\(reading.pitch),\(reading.roll),\(reading.yaw),\(reading.battery)\n"
+            let line = "\(timestamp),\(reading.ax),\(reading.ay),\(reading.az)," +
+                       "\(reading.gx),\(reading.gy),\(reading.gz),\(reading.battery)\n"
             csvText.append(line)
         }
         

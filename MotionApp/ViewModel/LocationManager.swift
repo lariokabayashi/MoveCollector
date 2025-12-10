@@ -32,13 +32,13 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
     func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
         switch manager.authorizationStatus {
         case .authorizedAlways:
-            print("✅ Authorized Always")
+            print("Authorized Always")
         case .authorizedWhenInUse:
-            print("🟡 Authorized When In Use — needs Always for background")
+            print("Authorized When In Use — needs Always for background")
         case .denied, .restricted:
-            print("🚫 Permission denied")
+            print("Permission denied")
         case .notDetermined:
-            print("⏳ Waiting for user decision")
+            print("Waiting for user decision")
         @unknown default:
             break
         }
@@ -46,7 +46,7 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
 
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         for loc in locations {
-            print("📍 Nova localização: \(loc.coordinate)")
+            print("Nova localização: \(loc.coordinate)")
             // Salvar ou processar seus dados aqui
         }
     }
