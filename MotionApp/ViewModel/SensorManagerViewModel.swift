@@ -23,7 +23,7 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
     private var saveCounter = 0
     
     // MARK: - ML Model (ConvNet)
-    private let convNet = try! ConvNet_DynamicBatch()
+    private let cnn_pff_2D = try! CNN_PFF_2D()
     private var mlBuffer: [[Double]] = []      // sliding window buffer
     private let windowSize = 60                // 3 sec @ 20 Hz
     
@@ -110,8 +110,8 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
         print(input)
 
         do {
-            let output = try convNet.prediction(input: input)
-            let probs = output.var_53ShapedArray
+            let output = try cnn_pff_2D.prediction(x_1: input)
+            let probs = output.var_134ShapedArray
             let predictedIndex = argmax(probs)
             
             DispatchQueue.main.async {
