@@ -195,6 +195,16 @@ struct ContentView: View {
             .shadow(color: .black.opacity(0.2), radius: 8, x: 0, y: 4)
             .accessibilityIdentifier("StartStopButton")
             
+            if let csvURL = csvURL {
+                ShareLink(
+                    item: csvURL,
+                    preview: SharePreview("Sensor Data", image: Image(systemName: "square.and.arrow.up"))
+                ) {
+                    Image(systemName: "square.and.arrow.up")
+                        .resizable()
+                        .frame(width: 30, height: 40)
+                }
+            }
         }
         .padding()
     }
