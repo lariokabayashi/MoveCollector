@@ -6,7 +6,7 @@ import SwiftUI
 @available(iOS 26.0, *)
 class AppDelegate: UIResponder, UIApplicationDelegate, ObservableObject {
     private let appConstants = AppConstants()
-    private let locationManager = LocationManager()
+    private let locationManager = LocationManagerViewModel()
     private let scheduler = BGTaskScheduler.shared
     private var submitted = false
     
