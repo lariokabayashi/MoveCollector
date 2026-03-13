@@ -7,7 +7,7 @@
 
 import CoreLocation
 
-class LocationManager: NSObject, CLLocationManagerDelegate {
+class LocationManagerViewModel: NSObject, CLLocationManagerDelegate {
     private let locationManager = CLLocationManager()
 
     override init() {

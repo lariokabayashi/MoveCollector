@@ -23,9 +23,58 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
     private var saveCounter = 0
     
     // MARK: - ML Model (ConvNet)
-    private let cnn_pff_2D = try! CNN_PFF_2D()
-    private var mlBuffer: [[Double]] = []      // sliding window buffer
+    private var cnn_pff_2D: CNN_PFF_2D?
+    private var mlBufferTimed: [Sample6] = []     // sliding window buffer with timestamps
     private let windowSize = 60                // 3 sec @ 20 Hz
+    
+    private func lerp(_ v0: Double, _ v1: Double, alpha: Double) -> Double {
+        return v0 + (v1 - v0) * alpha
+    }
+    
+    private func interpolateLinear(t: TimeInterval, p0: Sample6, p1: Sample6) -> Sample6 {
+        let dt = p1.t - p0.t
+        let alpha = dt > 0 ? (t - p0.t) / dt : 0.0
+        return Sample6(
+            t: t,
+            ax: lerp(p0.ax, p1.ax, alpha: alpha),
+            ay: lerp(p0.ay, p1.ay, alpha: alpha),
+            az: lerp(p0.az, p1.az, alpha: alpha),
+            gx: lerp(p0.gx, p1.gx, alpha: alpha),
+            gy: lerp(p0.gy, p1.gy, alpha: alpha),
+            gz: lerp(p0.gz, p1.gz, alpha: alpha)
+        )
+    }
+    
+    private func resampleToFixedRate(samples: [Sample6], startTime: TimeInterval, count: Int, rateHz: Double) -> [Sample6] {
+        guard samples.count >= 2 else { return samples }
+        let dt = 1.0 / rateHz
+        var result: [Sample6] = []
+        result.reserveCapacity(count)
+        var i = 0
+        for n in 0..<count {
+            let targetT = startTime + Double(n) * dt
+            while i + 1 < samples.count && samples[i + 1].t < targetT {
+                i += 1
+            }
+            if i + 1 < samples.count {
+                let p0 = samples[i]
+                let p1 = samples[i + 1]
+                if targetT <= p0.t {
+                    result.append(Sample6(t: targetT, ax: p0.ax, ay: p0.ay, az: p0.az, gx: p0.gx, gy: p0.gy, gz: p0.gz))
+                } else if targetT <= p1.t {
+                    result.append(interpolateLinear(t: targetT, p0: p0, p1: p1))
+                } else {
+                    result.append(Sample6(t: targetT, ax: p1.ax, ay: p1.ay, az: p1.az, gx: p1.gx, gy: p1.gy, gz: p1.gz))
+                }
+            } else if let last = samples.last {
+                result.append(Sample6(t: targetT, ax: last.ax, ay: last.ay, az: last.az, gx: last.gx, gy: last.gy, gz: last.gz))
+            }
+        }
+        return result
+    }
+    
+    @Published var mlStatusMessage: String = ""
+    @Published var mlIsReady: Bool = false
     
     @Published var predictedActivity: String = ""
     
@@ -35,6 +84,17 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
         self.context = context
         UIDevice.current.isBatteryMonitoringEnabled = true
         super.init()
+        
+        do {
+            let model = try CNN_PFF_2D()
+            self.cnn_pff_2D = model
+            self.mlIsReady = true
+            self.mlStatusMessage = "ML model loaded"
+        } catch {
+            self.mlIsReady = false
+            self.mlStatusMessage = "Failed to load ML model: \(error.localizedDescription)"
+            print("[ML] Model load error:", error)
+        }
     }
     
     @Published var isRecording = false
@@ -106,54 +166,64 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
     }
     
     private func runHARPrediction() {
-        guard let input = prepareMLMultiArray() else { return }
-        print(input)
+        guard mlIsReady, let model = cnn_pff_2D else {
+            DispatchQueue.main.async { self.mlStatusMessage = "ML model not ready" }
+            return
+        }
+        guard let input = prepareMLMultiArray() else {
+            DispatchQueue.main.async { self.mlStatusMessage = "Failed to prepare ML input" }
+            return
+        }
 
         do {
-            let output = try cnn_pff_2D.prediction(x_1: input)
+            let output = try model.prediction(x_1: input)
             let probs = output.var_134ShapedArray
             let predictedIndex = argmax(probs)
-            
             DispatchQueue.main.async {
                 self.predictedActivity = self.CLASS_EMOJI[predictedIndex]
+                self.mlStatusMessage = "Prediction OK"
             }
-            
         } catch {
+            DispatchQueue.main.async {
+                self.mlStatusMessage = "HAR Prediction Error: \(error.localizedDescription)"
+            }
             print("HAR Prediction Error:", error)
         }
     }
     
     private func prepareMLMultiArray() -> MLMultiArray? {
-        let shape: [NSNumber] = [1, 6, 60]
+        guard mlBufferTimed.count >= windowSize else { return nil }
+        // derive rate from updateInterval
+        let dt = appConstants.updateInterval
+        guard dt > 0 else { return nil }
+        let rateHz = 1.0 / dt
+
+        // Build resampled window starting at the first timestamp
+        guard let startT = mlBufferTimed.first?.t else { return nil }
+        let resampled = resampleToFixedRate(samples: mlBufferTimed, startTime: startT, count: windowSize, rateHz: rateHz)
+
+        let shape: [NSNumber] = [1, 6, NSNumber(value: windowSize)]
         guard let array = try? MLMultiArray(shape: shape, dataType: .float32) else { return nil }
-        
-        for t in 0..<windowSize {
-            let sample = mlBuffer[t]   // [ax, ay, az, gx, gy, gz]
-            
-            for (index, element) in sample.enumerated() {
-                array[[0, index, t] as [NSNumber]] = NSNumber(value: element)
-                print("array value at \(index):\(NSNumber(value: element))")
-            }
-//            for c in 0..<6 {
-//                let value = Float(sample[c])
-//                array[[0, c, t] as [NSNumber]] = value as NSNumber
-//                print("array value at \(c):\(array[c])")
-//            }
+
+        for (tIndex, s) in resampled.enumerated() {
+            array[[0, 0, tIndex] as [NSNumber]] = NSNumber(value: Float32(s.ax))
+            array[[0, 1, tIndex] as [NSNumber]] = NSNumber(value: Float32(s.ay))
+            array[[0, 2, tIndex] as [NSNumber]] = NSNumber(value: Float32(s.az))
+            array[[0, 3, tIndex] as [NSNumber]] = NSNumber(value: Float32(s.gx))
+            array[[0, 4, tIndex] as [NSNumber]] = NSNumber(value: Float32(s.gy))
+            array[[0, 5, tIndex] as [NSNumber]] = NSNumber(value: Float32(s.gz))
         }
         return array
     }
     
     private func appendToMLBuffer(ax: Double, ay: Double, az: Double,
                                   gx: Double, gy: Double, gz: Double) {
-        
-        let sample = [ax, ay, az, gx, gy, gz]
-        mlBuffer.append(sample)
-        
-        if mlBuffer.count > windowSize {
-            mlBuffer.removeFirst()
-        }
-        
-        if mlBuffer.count == windowSize {
+        let t = Date().timeIntervalSince1970
+        mlBufferTimed.append(Sample6(t: t, ax: ax, ay: ay, az: az, gx: gx, gy: gy, gz: gz))
+
+        if mlBufferTimed.count > windowSize { mlBufferTimed.removeFirst() }
+
+        if mlBufferTimed.count == windowSize {
             runHARPrediction()
         }
     }
@@ -278,3 +348,4 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
         }
     }
 }
+
