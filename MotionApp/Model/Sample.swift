@@ -8,7 +8,7 @@
 import Foundation
 
 // MARK: - Resampling/Interpolation types & helpers
-struct Sample6 {
+struct Sample: Equatable {
     let t: TimeInterval
     let ax: Double
     let ay: Double

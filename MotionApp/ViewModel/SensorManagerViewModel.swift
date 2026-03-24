@@ -21,62 +21,27 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
     private let appConstants = AppConstants()
     private var collectionTimer: DispatchSourceTimer?
     private var saveCounter = 0
+    private let utils = Utils()
     
-    // MARK: - ML Model (ConvNet)
+    // MARK: - ML Model
     private var cnn_pff_2D: CNN_PFF_2D?
-    private var mlBufferTimed: [Sample6] = []     // sliding window buffer with timestamps
+    private var cnn_pff_2D_backbone: CNN_PFF_2D_backbone?
+    private var mlBufferTimed: [Sample] = []     // sliding window buffer with timestamps
     private let windowSize = 60                // 3 sec @ 20 Hz
-    
-    private func lerp(_ v0: Double, _ v1: Double, alpha: Double) -> Double {
-        return v0 + (v1 - v0) * alpha
-    }
-    
-    private func interpolateLinear(t: TimeInterval, p0: Sample6, p1: Sample6) -> Sample6 {
-        let dt = p1.t - p0.t
-        let alpha = dt > 0 ? (t - p0.t) / dt : 0.0
-        return Sample6(
-            t: t,
-            ax: lerp(p0.ax, p1.ax, alpha: alpha),
-            ay: lerp(p0.ay, p1.ay, alpha: alpha),
-            az: lerp(p0.az, p1.az, alpha: alpha),
-            gx: lerp(p0.gx, p1.gx, alpha: alpha),
-            gy: lerp(p0.gy, p1.gy, alpha: alpha),
-            gz: lerp(p0.gz, p1.gz, alpha: alpha)
-        )
-    }
-    
-    private func resampleToFixedRate(samples: [Sample6], startTime: TimeInterval, count: Int, rateHz: Double) -> [Sample6] {
-        guard samples.count >= 2 else { return samples }
-        let dt = 1.0 / rateHz
-        var result: [Sample6] = []
-        result.reserveCapacity(count)
-        var i = 0
-        for n in 0..<count {
-            let targetT = startTime + Double(n) * dt
-            while i + 1 < samples.count && samples[i + 1].t < targetT {
-                i += 1
-            }
-            if i + 1 < samples.count {
-                let p0 = samples[i]
-                let p1 = samples[i + 1]
-                if targetT <= p0.t {
-                    result.append(Sample6(t: targetT, ax: p0.ax, ay: p0.ay, az: p0.az, gx: p0.gx, gy: p0.gy, gz: p0.gz))
-                } else if targetT <= p1.t {
-                    result.append(interpolateLinear(t: targetT, p0: p0, p1: p1))
-                } else {
-                    result.append(Sample6(t: targetT, ax: p1.ax, ay: p1.ay, az: p1.az, gx: p1.gx, gy: p1.gy, gz: p1.gz))
-                }
-            } else if let last = samples.last {
-                result.append(Sample6(t: targetT, ax: last.ax, ay: last.ay, az: last.az, gx: last.gx, gy: last.gy, gz: last.gz))
-            }
-        }
-        return result
-    }
     
     @Published var mlStatusMessage: String = ""
     @Published var mlIsReady: Bool = false
     
     @Published var predictedActivity: String = ""
+    
+    @Published var features: MLShapedArray<Float> = []
+    
+    @Published var linkageMatrix: [[Double]] = []
+    @Published var clusterLabels: [Int] = []
+    
+    // MARK: - Chart Data (original vs resampled)
+    @Published var chartOriginalAX: [Sample] = []
+    @Published var chartResampledAX: [Sample] = []
     
     var CLASS_EMOJI = ["sit 🪑", "stand 🧍", "walk 🚶", "climb up 🪜⬆️", "climb down 🪜⬇️", "run 🏃"]
     
@@ -107,6 +72,7 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
     @Published var gyroZ = 0.0
     
     @Published var batteryLevel: Float = UIDevice.current.batteryLevel
+    
     
     func startCollection() {
         
@@ -149,22 +115,6 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
         appDelegate?.submitBackgroundCollection()
     }
     
-    private func argmax(_ arr: MLShapedArray<Float>) -> Int {
-        var bestIndex = 0
-        var bestValue = Float.leastNormalMagnitude
-
-        for i in 0..<arr.shape[1] {
-            let slice = arr[0, i]       
-            let value = slice.scalar
-            
-            if value! > bestValue {
-                bestValue = value!
-                bestIndex = i
-            }
-        }
-        return bestIndex
-    }
-    
     private func runHARPrediction() {
         guard mlIsReady, let model = cnn_pff_2D else {
             DispatchQueue.main.async { self.mlStatusMessage = "ML model not ready" }
@@ -178,7 +128,7 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
         do {
             let output = try model.prediction(x_1: input)
             let probs = output.var_134ShapedArray
-            let predictedIndex = argmax(probs)
+            let predictedIndex = utils.argmax(probs)
             DispatchQueue.main.async {
                 self.predictedActivity = self.CLASS_EMOJI[predictedIndex]
                 self.mlStatusMessage = "Prediction OK"
@@ -191,6 +141,38 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
         }
     }
     
+    private func run_CNN_PFF_2D_backbone() {
+        guard mlIsReady, let model = cnn_pff_2D_backbone else {
+            DispatchQueue.main.async { self.mlStatusMessage = "ML model not ready" }
+            return
+        }
+        guard let input = prepareMLMultiArray() else {
+            DispatchQueue.main.async { self.mlStatusMessage = "Failed to prepare ML input" }
+            return
+        }
+        do {
+            let output = try model.prediction(x_1: input)
+            DispatchQueue.main.async {
+                self.features = output.var_200ShapedArray
+                self.mlStatusMessage = "Prediction OK"
+            }
+        } catch {
+            DispatchQueue.main.async {
+                self.mlStatusMessage = "CNN_PFF_2D_backbone Prediction Error: \(error.localizedDescription)"
+            }
+            print("CNN_PFF_2D_backbone Prediction Error:", error)
+        }
+    }
+    
+    func runAdjacentWardClustering() {
+        let data2D = utils.shapedArrayTo2D(self.features)
+        let Z = utils.linkageAdjacentWard(data: data2D)
+        // t precisa ser inteiro, t é o número de clusters/episódios finais
+        let labels = utils.fclusterCustom(Z: Z, t: 5.0)
+        self.linkageMatrix = Z
+        self.clusterLabels = labels
+    }
+    
     private func prepareMLMultiArray() -> MLMultiArray? {
         guard mlBufferTimed.count >= windowSize else { return nil }
         // derive rate from updateInterval
@@ -200,7 +182,7 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
 
         // Build resampled window starting at the first timestamp
         guard let startT = mlBufferTimed.first?.t else { return nil }
-        let resampled = resampleToFixedRate(samples: mlBufferTimed, startTime: startT, count: windowSize, rateHz: rateHz)
+        let resampled = utils.resampleToFixedRate(samples: mlBufferTimed, startTime: startT, count: windowSize, rateHz: rateHz)
 
         let shape: [NSNumber] = [1, 6, NSNumber(value: windowSize)]
         guard let array = try? MLMultiArray(shape: shape, dataType: .float32) else { return nil }
@@ -216,14 +198,26 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
         return array
     }
     
-    private func appendToMLBuffer(ax: Double, ay: Double, az: Double,
+    func appendToMLBuffer(timestamp: TimeInterval, ax: Double, ay: Double, az: Double,
                                   gx: Double, gy: Double, gz: Double) {
-        let t = Date().timeIntervalSince1970
-        mlBufferTimed.append(Sample6(t: t, ax: ax, ay: ay, az: az, gx: gx, gy: gy, gz: gz))
+        mlBufferTimed.append(Sample(t: timestamp, ax: ax, ay: ay, az: az, gx: gx, gy: gy, gz: gz))
 
         if mlBufferTimed.count > windowSize { mlBufferTimed.removeFirst() }
+        
+        // Keep original samples for charting (limit to windowSize)
+        chartOriginalAX = mlBufferTimed
 
         if mlBufferTimed.count == windowSize {
+            // Build resampled sequence for charting using same rate/window
+            let dt = appConstants.updateInterval
+            if dt > 0, let startT = mlBufferTimed.first?.t {
+                let rateHz = 1.0 / dt
+                let resampled = utils.resampleToFixedRate(samples: mlBufferTimed, startTime: startT, count: windowSize, rateHz: rateHz)
+//                chartResampledAX = resampled
+                DispatchQueue.main.async {
+                    self.chartResampledAX = resampled
+                }
+            }
             runHARPrediction()
         }
     }
@@ -232,7 +226,8 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        let timestamp = formatter.string(from: Date())
+        let now = Date()
+        let timestamp = formatter.string(from: now)
         if let accel = motionManager.deviceMotion?.userAcceleration, // shows the acceleration without the gravity force
            let gyro  = motionManager.gyroData {
             
@@ -245,8 +240,10 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
                 self.gyroZ = gyro.rotationRate.z
                 self.batteryLevel = UIDevice.current.batteryLevel
                 
-                // ---- ML HAR Pipeline ----------------------------
+                let now = Date()
+                let tEpoch = now.timeIntervalSince1970
                 self.appendToMLBuffer(
+                    timestamp: tEpoch,
                     ax: self.accelX,
                     ay: self.accelY,
                     az: self.accelZ,
@@ -279,6 +276,9 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
                 do {
                     try self.context.save()
                     self.saveCounter = 0
+//                    DispatchQueue.main.async {
+//                        self.refreshChartFromStore()
+//                    }
                 } catch {
                     print("Core Data save error: \(error.localizedDescription)")
                 }
