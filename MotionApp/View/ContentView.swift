@@ -31,6 +31,8 @@ struct ContentView: View {
 
                     // Predicted activity
                     ActivityCard(activity: sensorManager.predictedActivity)
+                    
+//                    ResampleComparisonChartView(viewModel: sensorManager)
 
                     // Actions
                     VStack(spacing: 8) {
