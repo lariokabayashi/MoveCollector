@@ -1,4 +1,11 @@
 //
+//  SensorManagerVMCompletel.swift
+//  MotionApp
+//
+//  Created by Larissa Okabayashi on 25/03/26.
+//
+
+//
 //  SensorManager.swift
 //  MotionApp
 //
@@ -13,7 +20,7 @@ import CoreLocation
 import CoreML
 
 @available(iOS 26.0, *)
-final class SensorManagerViewModel: NSObject, ObservableObject {
+final class SensorManagerVMComplete: NSObject, ObservableObject {
     private let motionManager = CMMotionManager()
     private let context: NSManagedObjectContext
     private let queue = OperationQueue()
@@ -22,22 +29,32 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
     private var collectionTimer: DispatchSourceTimer?
     private var saveCounter = 0
     private let utils = Utils()
+    private let constants = AppConstants()
+    
+    private let lastProcessKey = "lastProcessDate"
     
     // MARK: - ML Model
+    private var cnn_pff_2D: CNN_PFF_2D?
     private var cnn_pff_2D_backbone: CNN_PFF_2D_backbone?
     private var mlBufferTimed: [Sample] = []     // sliding window buffer with timestamps
-    private let windowSize = 60                // 3 sec @ 20 Hz
     
     private var features: MLShapedArray<Float> = []
     
     @Published var mlStatusMessage: String = ""
     @Published var mlIsReady: Bool = false
     
+    @Published var predictedActivity: String = ""
+    
     @Published var data2D: [[Double]] = []
     
     @Published var linkageMatrix: [[Double]] = []
     @Published var clusterLabels: [Int] = []
-    @Published var matrices: [[[Double]]] = []
+    
+    // MARK: - Chart Data (original vs resampled)
+    @Published var chartOriginalAX: [Sample] = []
+    @Published var chartResampledAX: [Sample] = []
+    
+    var CLASS_EMOJI = ["sit 🪑", "stand 🧍", "walk 🚶", "climb up 🪜⬆️", "climb down 🪜⬇️", "run 🏃"]
     
     init(context: NSManagedObjectContext) {
         self.context = context
@@ -45,14 +62,22 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
         super.init()
         
         do {
-            let model = try CNN_PFF_2D_backbone()
-            self.cnn_pff_2D_backbone = model
+            let model = try CNN_PFF_2D()
+            self.cnn_pff_2D = model
             self.mlIsReady = true
             self.mlStatusMessage = "ML model loaded"
         } catch {
             self.mlIsReady = false
             self.mlStatusMessage = "Failed to load ML model: \(error.localizedDescription)"
             print("[ML] Model load error:", error)
+        }
+        
+        NotificationCenter.default.addObserver(
+            forName: UIDevice.batteryStateDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.handleBatteryStateChange()
         }
     }
     
@@ -109,6 +134,32 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
         appDelegate?.submitBackgroundCollection()
     }
     
+    private func runHARPrediction() {
+        guard mlIsReady, let model = cnn_pff_2D else {
+            DispatchQueue.main.async { self.mlStatusMessage = "ML model not ready" }
+            return
+        }
+        guard let input = prepareMLMultiArray() else {
+            DispatchQueue.main.async { self.mlStatusMessage = "Failed to prepare ML input" }
+            return
+        }
+
+        do {
+            let output = try model.prediction(x_1: input)
+            let probs = output.var_134ShapedArray
+            let predictedIndex = utils.argmax(probs)
+            DispatchQueue.main.async {
+                self.predictedActivity = self.CLASS_EMOJI[predictedIndex]
+                self.mlStatusMessage = "Prediction OK"
+            }
+        } catch {
+            DispatchQueue.main.async {
+                self.mlStatusMessage = "HAR Prediction Error: \(error.localizedDescription)"
+            }
+            print("HAR Prediction Error:", error)
+        }
+    }
+    
     private func run_CNN_PFF_2D_backbone() {
         guard mlIsReady, let model = cnn_pff_2D_backbone else {
             DispatchQueue.main.async { self.mlStatusMessage = "ML model not ready" }
@@ -134,7 +185,7 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
     }
     
     private func prepareMLMultiArray() -> MLMultiArray? {
-        guard mlBufferTimed.count >= windowSize else { return nil }
+        guard mlBufferTimed.count >= constants.windowSize else { return nil }
         // derive rate from updateInterval
         let dt = appConstants.updateInterval
         guard dt > 0 else { return nil }
@@ -142,9 +193,9 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
 
         // Build resampled window starting at the first timestamp
         guard let startT = mlBufferTimed.first?.t else { return nil }
-        let resampled = utils.resampleToFixedRate(samples: mlBufferTimed, startTime: startT, count: windowSize, rateHz: rateHz)
+        let resampled = utils.resampleToFixedRate(samples: mlBufferTimed, startTime: startT, count: constants.windowSize, rateHz: rateHz)
 
-        let shape: [NSNumber] = [1, 6, NSNumber(value: windowSize)]
+        let shape: [NSNumber] = [1, 6, NSNumber(value: constants.windowSize)]
         guard let array = try? MLMultiArray(shape: shape, dataType: .float32) else { return nil }
 
         for (tIndex, s) in resampled.enumerated() {
@@ -162,9 +213,23 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
                                   gx: Double, gy: Double, gz: Double) {
         mlBufferTimed.append(Sample(t: timestamp, ax: ax, ay: ay, az: az, gx: gx, gy: gy, gz: gz))
 
-        if mlBufferTimed.count > windowSize { mlBufferTimed.removeFirst() }
+        if mlBufferTimed.count > constants.windowSize { mlBufferTimed.removeFirst() }
+        
+        // Keep original samples for charting (limit to windowSize)
+        chartOriginalAX = mlBufferTimed
 
-        if mlBufferTimed.count == windowSize {
+        if mlBufferTimed.count == constants.windowSize {
+            // Build resampled sequence for charting using same rate/window
+            let dt = appConstants.updateInterval
+            if dt > 0, let startT = mlBufferTimed.first?.t {
+                let rateHz = 1.0 / dt
+                let resampled = utils.resampleToFixedRate(samples: mlBufferTimed, startTime: startT, count: constants.windowSize, rateHz: rateHz)
+                chartResampledAX = resampled
+                DispatchQueue.main.async {
+                    self.chartResampledAX = resampled
+                }
+            }
+            runHARPrediction()
             run_CNN_PFF_2D_backbone()
         }
     }
@@ -200,62 +265,40 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
                 )
             }
         }
+
+        saveReading(timestamp: timestamp, ax: accelX, ay: accelY, az: accelZ, gx: gyroX, gy: gyroY, gz: gyroZ, battery: Double(batteryLevel))
         
         saveFeatures(timestamp: timestamp, data2D: data2D)
 
     }
     
-    // Concatena uma lista de [[Double]] em uma única [[Double]] (empilha por linhas)
-    private func aggregateFeatureMatrices(_ matrices: [[[Double]]]) -> [[Double]] {
-        var aggregated: [[Double]] = []
-        for m in matrices {
-            aggregated.append(contentsOf: m)
-        }
-        return aggregated
-    }
-
-    func runDailyClustering(t: Double = 3.0) {
-        // Clear previous state
-        self.matrices.removeAll()
-        // Fetch today's feature matrices and aggregate
-        _ = self.fetchFeaturesForToday()
-        guard !self.matrices.isEmpty else {
-            DispatchQueue.main.async {
-                self.linkageMatrix = []
-                self.clusterLabels = []
+    private func saveReading(timestamp: String, ax: Double, ay: Double, az: Double, gx: Double, gy: Double, gz: Double, battery: Double) {
+        context.perform {
+            let reading = SensorReading(context: self.context)
+            reading.id = UUID()
+            reading.timestamp = timestamp
+            reading.ax = ax
+            reading.ay = ay
+            reading.az = az
+            reading.gx = gx
+            reading.gy = gy
+            reading.gz = gz
+            reading.battery = battery
+            
+            self.saveCounter += 1
+            if self.saveCounter >= self.appConstants.saveThreshold {
+                do {
+                    try self.context.save()
+                    self.saveCounter = 0
+                } catch {
+                    print("Core Data save error: \(error.localizedDescription)")
+                }
             }
-            return
-        }
-        let aggregated = self.aggregateFeatureMatrices(self.matrices)
-        guard aggregated.count >= 2 else {
-            DispatchQueue.main.async {
-                self.linkageMatrix = []
-                self.clusterLabels = []
-            }
-            return
-        }
-        let Z = self.utils.linkageAdjacentWard(data: aggregated)
-        let labels = self.utils.fclusterCustom(Z: Z, t: t)
-        DispatchQueue.main.async {
-            self.linkageMatrix = Z
-            self.clusterLabels = labels
+            
+            print("[DEBUG] Timestamp: \(timestamp), State: \(UIApplication.shared.applicationState.rawValue), Battery: \(UIDevice.current.batteryLevel)")
         }
     }
     
-//    // Public API used by UI to fetch today's aggregated 2D data for clustering
-//    func fetchTodayData() {
-//        // Reset containers
-//        self.matrices.removeAll()
-//        // Fetch FeatureMatrix objects for today and rebuild matrices
-//        _ = self.fetchFeaturesForToday()
-//        // Aggregate into a single 2D array
-//        let aggregated = self.aggregateFeatureMatrices(self.matrices)
-//        DispatchQueue.main.async {
-//            self.data2D = aggregated
-//        }
-//    }
-    
-    // MARK: - Persistance
     private func saveFeatures(timestamp: String, data2D: [[Double]]) {
         context.perform {
             let featureMatrix = FeatureMatrix(context: self.context)
@@ -278,30 +321,19 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
             print("[DEBUG] Timestamp: \(timestamp), State: \(UIApplication.shared.applicationState.rawValue), Battery: \(UIDevice.current.batteryLevel)")
         }
     }
-
-    // Busca FeatureMatrix do dia corrente e reconstrói [[Double]]
-    private func fetchFeaturesForToday() -> [FeatureMatrix] {
-        let fetchRequest: NSFetchRequest<FeatureMatrix> = FeatureMatrix.fetchRequest()
+    
+    // Funções só para Export to CSV
+    private func fetchSensorData(context: NSManagedObjectContext, batchSize: Int = 1000) -> [SensorReading] {
+        let fetchRequest: NSFetchRequest<SensorReading> = SensorReading.fetchRequest()
+        fetchRequest.sortDescriptors = [NSSortDescriptor(key: "timestamp", ascending: true)]
+        fetchRequest.fetchBatchSize = batchSize
+        
         do {
             let results = try context.fetch(fetchRequest)
-            let isoParser = utils.isoParser
-            let startOfDay = Calendar.current.startOfDay(for: Date())
-            let endOfDay = Calendar.current.date(byAdding: .day, value: 1, to: startOfDay)!
-
-            for fm in results.prefix(100) {
-                guard let ts = fm.timestamp,
-                      let date = isoParser.date(from: ts) else { continue }
-                if date >= startOfDay && date < endOfDay {
-                    let rows = Int(fm.rows)
-                    let cols = Int(fm.cols)
-                    guard let payload = fm.payload else { continue }
-                    let mat = self.utils.dataToDouble2DRaw(payload, rows: rows, cols: cols)
-                    matrices.append(mat)
-                }
-            }
+            print("Fetched \(results.count) sensor data entries")
             return results
         } catch {
-            print("Failed to fetch FeatureMatrix: \(error.localizedDescription)")
+            print("Failed to fetch sensor data: \(error.localizedDescription)")
             return []
         }
     }
@@ -319,22 +351,23 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
     }
     
     func exportToCSV() -> URL? {
-        let featuresData = fetchFeaturesForToday()
-        guard !featuresData.isEmpty else {
+        let sensorData = fetchSensorData(context: context, batchSize: 1000)
+        guard !sensorData.isEmpty else {
             print("No data to export")
             return nil
         }
         
-        let fileName = "features_data_\(Date().timeIntervalSince1970).csv"
+        let fileName = "sensor_data_\(Date().timeIntervalSince1970).csv"
 
         let documentDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         let fileURL = documentDirectory.appendingPathComponent(fileName)
         
-        var csvText = "timestamp,id,payload,cols,rows\n"
+        var csvText = "timestamp,ax,ay,az,gx,gy,gz,battery\n"
 
-        for reading in featuresData {
+        for reading in sensorData {
             let timestamp = reading.timestamp ?? ""
-            let line = "\(timestamp),\(reading.id),\(reading.payload),\(reading.cols),\(reading.rows)\n"
+            let line = "\(timestamp),\(reading.ax),\(reading.ay),\(reading.az)," +
+                       "\(reading.gx),\(reading.gy),\(reading.gz),\(reading.battery)\n"
             csvText.append(line)
         }
         
@@ -349,5 +382,68 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
             return nil
         }
     }
-}
+    
+    // MARK: - Battery / Daily Processing
+    private func handleBatteryStateChange() {
+        let state = UIDevice.current.batteryState
+        if state == .charging || state == .full {
+            processDailyClusteringIfNeeded()
+        }
+    }
 
+    func processDailyClusteringIfNeeded() {
+        DispatchQueue.global(qos: .utility).async {
+            let matrices = self.fetchFeaturesForToday()
+            guard !matrices.isEmpty else { return }
+            let aggregated = self.aggregateFeatureMatrices(matrices)
+            guard aggregated.count >= 2 else { return }
+            let Z = self.utils.linkageAdjacentWard(data: aggregated)
+            let labels = self.utils.fclusterCustom(Z: Z, t: 8.0) // ajuste t conforme desejado
+            DispatchQueue.main.async {
+                self.linkageMatrix = Z
+                self.clusterLabels = labels
+            }
+        }
+    }
+
+    // Busca FeatureMatrix do dia corrente e reconstrói [[Double]]
+    private func fetchFeaturesForToday() -> [[[Double]]] {
+        let fetchRequest: NSFetchRequest<FeatureMatrix> = FeatureMatrix.fetchRequest()
+        // Filtrar por dia corrente usando timestamp ISO8601 armazenado como String
+        // Carrega todas e filtra em memória por simplicidade; para grandes volumes, use predicate adequado.
+        do {
+            let results = try context.fetch(fetchRequest)
+            let iso = ISO8601DateFormatter()
+            iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            iso.timeZone = TimeZone(secondsFromGMT: 0)
+            let startOfDay = Calendar.current.startOfDay(for: Date())
+            let endOfDay = Calendar.current.date(byAdding: .day, value: 1, to: startOfDay)!
+
+            var matrices: [[[Double]]] = []
+            for fm in results {
+                guard let ts = fm.timestamp,
+                      let date = iso.date(from: ts) else { continue }
+                if date >= startOfDay && date < endOfDay {
+                    let rows = Int(fm.rows)
+                    let cols = Int(fm.cols)
+                    guard let payload = fm.payload else { continue }
+                    let mat = self.utils.dataToDouble2DRaw(payload, rows: rows, cols: cols)
+                    matrices.append(mat)
+                }
+            }
+            return matrices
+        } catch {
+            print("Failed to fetch FeatureMatrix: \(error.localizedDescription)")
+            return []
+        }
+    }
+
+    // Concatena uma lista de [[Double]] em uma única [[Double]] (empilha por linhas)
+    private func aggregateFeatureMatrices(_ matrices: [[[Double]]]) -> [[Double]] {
+        var aggregated: [[Double]] = []
+        for m in matrices {
+            aggregated.append(contentsOf: m)
+        }
+        return aggregated
+    }
+}

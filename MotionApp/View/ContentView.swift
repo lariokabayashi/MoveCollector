@@ -11,7 +11,11 @@ struct ContentView: View {
     @State private var csvURL: URL?
     @State private var startTime = Date()
     private let appConstants = AppConstants()
-
+    private let utils = Utils()
+    
+    @State private var targetEpisodes = 3
+    @State private var availableTargets = [3, 5, 7, 10]
+    
     var body: some View {
         NavigationStack {
             ScrollView {
@@ -22,18 +26,19 @@ struct ContentView: View {
                             .accessibilityIdentifier("DurationTimerLabel")
                         MetricCard(title: "Bateria", value: "\(Int(sensorManager.batteryLevel * 100))%")
                     }
-
+                    
                     // Sensors
                     SensorCard(title: "Acelerômetro", unit: "m/s²", x: sensorManager.accelX, y: sensorManager.accelY, z: sensorManager.accelZ)
                         .accessibilityIdentifier("AccelXLabel")
-
-                    SensorCard(title: "Giroscópio", unit: "rad/s", x: sensorManager.gyroX, y: sensorManager.gyroY, z: sensorManager.gyroZ)
-
-                    // Predicted activity
-                    ActivityCard(activity: sensorManager.predictedActivity)
                     
-//                    ResampleComparisonChartView(viewModel: sensorManager)
-
+                    SensorCard(title: "Giroscópio", unit: "rad/s", x: sensorManager.gyroX, y: sensorManager.gyroY, z: sensorManager.gyroZ)
+                    
+                    // Predicted activity
+                    //                    ActivityCard(activity: sensorManager.predictedActivity)
+                    
+                    // Clustering
+                    SegmentationCard(sensorManager: sensorManager, targetEpisodes: $targetEpisodes, availableTargets: $availableTargets)
+                    
                     // Actions
                     VStack(spacing: 8) {
                         Button {
@@ -47,14 +52,14 @@ struct ContentView: View {
                         } label: {
                             Label(isUserStopped ? "Iniciar coleta" : "Parar coleta",
                                   systemImage: isUserStopped ? "play.fill" : "stop.fill")
-                                .font(.headline)
-                                .frame(maxWidth: .infinity)
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.borderedProminent)
                         .tint(isUserStopped ? .blue : .red)
                         .controlSize(.large)
                         .accessibilityIdentifier("StartStopButton")
-
+                        
                         if let csvURL = csvURL {
                             ShareLink(item: csvURL) {
                                 Label("Exportar CSV", systemImage: "square.and.arrow.up")
@@ -79,3 +84,4 @@ struct ContentView: View {
         // Fallback on earlier versions
     }
 }
+
