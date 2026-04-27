@@ -16,7 +16,7 @@ struct SeriesPoint: Identifiable {
 }
 
 struct ResampleChartView: View {
-    @ObservedObject var viewModel: SensorManagerViewModel
+    @ObservedObject var viewModel: SensorManagerVMComplete
 
     // Compute a common t0 across both series to avoid huge epoch values on X
     private var t0: Double? {

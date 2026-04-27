@@ -129,31 +129,106 @@ struct Utils {
         }
     }
     
+    struct PairKey: Hashable {
+        let u: Int
+        let v: Int
+        init(u: Int, v: Int) {
+            if u <= v { self.u = u; self.v = v } else { self.u = v; self.v = u }
+        }
+    }
+
+    final class LRUCache<Key: Hashable, Value> {
+        private final class Node {
+            let key: Key
+            var value: Value
+            var prev: Node?
+            var next: Node?
+            init(key: Key, value: Value) { self.key = key; self.value = value }
+        }
+
+        private var dict: [Key: Node] = [:]
+        private var head: Node?
+        private var tail: Node?
+        private let capacity: Int
+
+        init(capacity: Int = 256) { self.capacity = max(1, capacity) }
+
+        func get(_ key: Key) -> Value? {
+            guard let node = dict[key] else { return nil }
+            moveToHead(node)
+            return node.value
+        }
+
+        func set(_ value: Value, for key: Key) {
+            if let node = dict[key] {
+                node.value = value
+                moveToHead(node)
+                return
+            }
+            let node = Node(key: key, value: value)
+            dict[key] = node
+            addToHead(node)
+            if dict.count > capacity { removeTailIfNeeded() }
+        }
+
+        private func addToHead(_ node: Node) {
+            node.prev = nil
+            node.next = head
+            head?.prev = node
+            head = node
+            if tail == nil { tail = node }
+        }
+
+        private func moveToHead(_ node: Node) {
+            guard head !== node else { return }
+            // detach
+            node.prev?.next = node.next
+            node.next?.prev = node.prev
+            if tail === node { tail = node.prev }
+            // move to head
+            node.prev = nil
+            node.next = head
+            head?.prev = node
+            head = node
+        }
+
+        private func removeTailIfNeeded() {
+            guard let t = tail else { return }
+            dict[t.key] = nil
+            if let prev = t.prev {
+                prev.next = nil
+                tail = prev
+            } else {
+                head = nil
+                tail = nil
+            }
+        }
+    }
+    
     /// Calcula a distância entre um cluster u e um cluster v usando o método Ward, com programação dinâmica.
     /// - Parameters:
     ///   - u: ID do cluster u.
     ///   - v: ID do cluster v.
     ///   - z: Matriz de ligação (cada linha: [filhoEsq, filhoDir, ..., tamanhoCluster]).
     ///   - data: Dados originais (folhas), cada elemento é um vetor de Double.
-    ///   - distanciasPD: Array linearizado da matriz condensada com cache (use Double.nan para não computado).
+    ///   - cache: Cache LRU para distâncias já computadas.
     /// - Returns: Distância entre os clusters u e v, ou nil se índices inválidos.
-    func distSub(u: Int, v: Int, z: [[Double]], data: [[Double]], distanciasPD: inout [Double]) -> Double? {
+    func distSub(u: Int, v: Int, z: [[Double]], data: [[Double]], cache: inout LRUCache<PairKey, Double>) -> Double? {
         // Normaliza para u <= v
-        var u0 = min(u, v)
-        var v0 = max(u, v)
+        let u0 = min(u, v)
+        let v0 = max(u, v)
+        let key = PairKey(u: u0, v: v0)
         let numFolhas = data.count
-        let nCond = 2 * numFolhas - 1
-        guard let idx0 = condensedIndex(n: nCond, i: u0, j: v0) else { return nil }
 
         // Se já foi computado, retorna do cache
-        if !distanciasPD[idx0].isNaN {
-            return distanciasPD[idx0]
+        if let cached = cache.get(key) {
+            return cached
         }
 
         // Caso ambos sejam folhas
         if u0 < numFolhas && v0 < numFolhas {
             if let d = euclideanDist(a: data[u0], b: data[v0]) {
-                distanciasPD[idx0] = d
+                cache.set(d, for: key)
                 return d
             } else {
                 return nil
@@ -191,9 +266,9 @@ struct Utils {
             let size_t = clusterSize(id_t)
             let T = size_v + size_s + size_t
 
-            guard let d_vs = distSub(u: id_v, v: id_s, z: z, data: data, distanciasPD: &distanciasPD),
-                  let d_vt = distSub(u: id_v, v: id_t, z: z, data: data, distanciasPD: &distanciasPD),
-                  let d_st = distSub(u: id_s, v: id_t, z: z, data: data, distanciasPD: &distanciasPD) else {
+            guard let d_vs = distSub(u: id_v, v: id_s, z: z, data: data, cache: &cache),
+                  let d_vt = distSub(u: id_v, v: id_t, z: z, data: data, cache: &cache),
+                  let d_st = distSub(u: id_s, v: id_t, z: z, data: data, cache: &cache) else {
                 return nil
             }
 
@@ -202,7 +277,7 @@ struct Utils {
             temp -= (size_v / T) * (d_st * d_st)
             if abs(temp) < 1e-6 { temp = 0 }
             let dist = sqrt(max(0, temp))
-            distanciasPD[idx0] = dist
+            cache.set(dist, for: key)
             return dist
         }
         // Caso contrário, u é não-folha
@@ -216,9 +291,9 @@ struct Utils {
             let size_t = clusterSize(id_t)
             let T = size_v + size_s + size_t
 
-            guard let d_vs = distSub(u: id_v, v: id_s, z: z, data: data, distanciasPD: &distanciasPD),
-                  let d_vt = distSub(u: id_v, v: id_t, z: z, data: data, distanciasPD: &distanciasPD),
-                  let d_st = distSub(u: id_s, v: id_t, z: z, data: data, distanciasPD: &distanciasPD) else {
+            guard let d_vs = distSub(u: id_v, v: id_s, z: z, data: data, cache: &cache),
+                  let d_vt = distSub(u: id_v, v: id_t, z: z, data: data, cache: &cache),
+                  let d_st = distSub(u: id_s, v: id_t, z: z, data: data, cache: &cache) else {
                 return nil
             }
 
@@ -227,7 +302,7 @@ struct Utils {
             temp -= (size_v / T) * (d_st * d_st)
             if abs(temp) < 1e-6 { temp = 0 }
             let dist = sqrt(max(0, temp))
-            distanciasPD[idx0] = dist
+            cache.set(dist, for: key)
             return dist
         }
 
@@ -256,16 +331,14 @@ struct Utils {
         let nSamples = data.count
         guard nSamples >= 2 else { return [] }
 
-        // Tamanho da matriz condensada para n = 2*nSamples - 1
-        let nCond = 2 * nSamples - 1
-        let m = nCond * (nCond - 1) / 2
-        var distanciasPD = Array(repeating: Double.nan, count: m)
-
         // Matriz de ligação Z (nSamples - 1) x 4
         var z = Array(repeating: Array(repeating: 0.0, count: 4), count: nSamples - 1)
 
         // Clusters iniciais: 0..nSamples-1
         var clusters = Array(0..<nSamples)
+
+        // Cache LRU para distâncias
+        var cache = LRUCache<PairKey, Double>(capacity: 512)
 
         // Loop principal
         for i in 0..<(nSamples - 1) {
@@ -274,7 +347,7 @@ struct Utils {
             var dists = Array(repeating: 0.0, count: max(0, pairsCount))
             if pairsCount > 0 {
                 for j in 0..<pairsCount {
-                    if let d = distSub(u: clusters[j], v: clusters[j + 1], z: z, data: data, distanciasPD: &distanciasPD) {
+                    if let d = distSub(u: clusters[j], v: clusters[j + 1], z: z, data: data, cache: &cache) {
                         dists[j] = d
                     } else {
                         dists[j] = Double.greatestFiniteMagnitude
@@ -372,4 +445,32 @@ struct Utils {
         }
         return result
     }
+    
+    // Converte [[Double]] para Data (apenas bytes, sem metadados)
+    func double2DToDataRaw(_ matrix: [[Double]]) -> Data {
+        // Flatten row-major
+        let flat = matrix.flatMap { $0 }
+        return flat.withUnsafeBufferPointer { Data(buffer: $0) }
+    }
+    
+    // Reconstrói [[Double]] a partir de Data e metadados (rows/cols)
+    func dataToDouble2DRaw(_ data: Data, rows: Int, cols: Int) -> [[Double]] {
+        precondition(rows >= 0 && cols >= 0, "Dimensões inválidas")
+        let count = rows * cols
+        let array: [Double] = data.withUnsafeBytes {
+            Array(UnsafeBufferPointer<Double>(
+                start: $0.baseAddress!.assumingMemoryBound(to: Double.self),
+                count: count
+            ))
+        }
+        var result: [[Double]] = []
+        result.reserveCapacity(rows)
+        for r in 0..<rows {
+            let start = r * cols
+            let end = start + cols
+            result.append(Array(array[start..<end]))
+        }
+        return result
+    }
 }
+
