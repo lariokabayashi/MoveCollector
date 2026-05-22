@@ -7,8 +7,8 @@
 
 import SwiftUI
 
-struct SegmentationCard: View {
-    let sensorManager: SensorManagerViewModel
+struct SegmentationCardView: View {
+    @ObservedObject var sensorManager: SensorManagerViewModel
     @Binding var targetEpisodes: Int
     @Binding var availableTargets: [Int]
 
@@ -19,7 +19,7 @@ struct SegmentationCard: View {
                     .font(.headline)
                 Spacer()
                 Button("Processar") {
-                    sensorManager.runDailyClustering(t: Double(targetEpisodes))
+                    sensorManager.runDailyClustering(t: targetEpisodes)
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
@@ -40,7 +40,7 @@ struct SegmentationCard: View {
             }
             
             if !sensorManager.clusterLabels.isEmpty {
-                EpisodeBarChart(labels: sensorManager.clusterLabels)
+                EpisodeBarChartView(labels: sensorManager.clusterLabels)
                     .frame(height: 140)
             } else {
                 Text("Sem dados de clustering ainda.")
@@ -53,6 +53,7 @@ struct SegmentationCard: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+
         }
         .frame(maxWidth: .infinity)
         .padding()

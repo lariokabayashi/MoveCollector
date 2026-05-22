@@ -16,7 +16,7 @@ struct EpisodeSegment: Identifiable {
     var length: Int { endIndex - startIndex + 1 }
 }
 
-struct EpisodeBarChart: View {
+struct EpisodeBarChartView: View {
     let labels: [Int]
     var segments: [EpisodeSegment] { makeSegments(from: labels) }
     

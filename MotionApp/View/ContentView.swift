@@ -9,12 +9,13 @@ struct ContentView: View {
     @Environment(\.managedObjectContext) private var context
     @State private var isUserStopped = false
     @State private var csvURL: URL?
+    @State private var combinedCSVURL: URL?  // Novo: URL para CSV combinado
     @State private var startTime = Date()
     private let appConstants = AppConstants()
     private let utils = Utils()
     
-    @State private var targetEpisodes = 3
-    @State private var availableTargets = [3, 5, 7, 10]
+    @State private var targetEpisodes = 10
+    @State private var availableTargets = [5, 6, 7, 8, 9, 10]
     
     var body: some View {
         NavigationStack {
@@ -37,15 +38,19 @@ struct ContentView: View {
                     //                    ActivityCard(activity: sensorManager.predictedActivity)
                     
                     // Clustering
-                    SegmentationCard(sensorManager: sensorManager, targetEpisodes: $targetEpisodes, availableTargets: $availableTargets)
+                    SegmentationCardView(sensorManager: sensorManager, targetEpisodes: $targetEpisodes, availableTargets: $availableTargets)
                     
                     // Actions
                     VStack(spacing: 8) {
                         Button {
                             isUserStopped.toggle()
                             if isUserStopped {
-                                csvURL = sensorManager.exportToCSV()
+                                // Ordem importa (mudou na Etapa C): primeiro pedimos o stop —
+                                // que faz flush SÍNCRONO do writeContext — para depois exportar
+                                // lendo do disco. Sem essa ordem, o export perderia o último
+                                // batch parcial (< saveThreshold amostras).
                                 sensorManager.requestStopBackgroundCollection()
+                                combinedCSVURL = sensorManager.exportCombinedDataToCSV()
                             } else {
                                 sensorManager.submitBackgroundCollection()
                             }
@@ -60,11 +65,12 @@ struct ContentView: View {
                         .controlSize(.large)
                         .accessibilityIdentifier("StartStopButton")
                         
-                        if let csvURL = csvURL {
-                            ShareLink(item: csvURL) {
+                        if let combinedCSVURL = combinedCSVURL {
+                            ShareLink(item: combinedCSVURL) {
                                 Label("Exportar CSV", systemImage: "square.and.arrow.up")
                                     .font(.subheadline)
                             }
+                            .buttonStyle(.bordered)
                         }
                     }
                 }
