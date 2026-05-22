@@ -31,13 +31,13 @@ struct Utils {
         return bestIndex
     }
     
-    func lerp(_ v0: Double, _ v1: Double, alpha: Double) -> Double {
+    func lerp(_ v0: Float, _ v1: Float, alpha: Float) -> Float {
         return v0 + (v1 - v0) * alpha
     }
     
     func interpolateLinear(t: TimeInterval, p0: Sample, p1: Sample) -> Sample {
         let dt = p1.t - p0.t
-        let alpha = dt > 0 ? (t - p0.t) / dt : 0.0
+        let alpha = Float(dt > 0 ? (t - p0.t) / dt : 0.0)
         return Sample(
             t: t,
             ax: lerp(p0.ax, p1.ax, alpha: alpha),
@@ -89,19 +89,37 @@ struct Utils {
         return d.timeIntervalSince1970
     }
     
-    /// Calcula a distância euclidiana entre dois vetores.
-    /// - Parameters:
-    ///   - a: Vetor de valores em Double.
-    ///   - b: Vetor de valores em Double.
-    /// - Returns: Distância euclidiana entre `a` e `b`. Se os vetores tiverem tamanhos diferentes, retorna `nil`.
-    func euclideanDist(a: [Double], b: [Double]) -> Double? {
-        guard a.count == b.count else { return nil }
-        var sum: Double = 0
-        for i in 0..<a.count {
+//    /// Calcula a distância euclidiana entre dois vetores.
+//    /// - Parameters:
+//    ///   - a: Vetor de valores em Double.
+//    ///   - b: Vetor de valores em Double.
+//    /// - Returns: Distância euclidiana entre `a` e `b`. Se os vetores tiverem tamanhos diferentes, retorna `nil`.
+//    func euclideanDist(a: [Double], b: [Double]) -> Double? {
+//        guard a.count == b.count else { return nil }
+//        var sum: Double = 0
+//        var i = 0
+//        let n = a.count
+//        while i < n {
+//            let d = a[i] - b[i]
+//            sum += d * d
+//            i += 1
+//        }
+//        return sqrt(sum)
+//    }
+    
+    // Optimized squared Euclidean distance for Float buffers (no allocations)
+    @inline(__always)
+    func squaredEuclideanFloat(_ a: UnsafeBufferPointer<Float>, _ b: UnsafeBufferPointer<Float>) -> Float {
+        precondition(a.count == b.count)
+        var sum: Float = 0
+        var i = 0
+        let n = a.count
+        while i < n {
             let d = a[i] - b[i]
             sum += d * d
+            i += 1
         }
-        return sqrt(sum)
+        return sum
     }
     
     /// Calcula o índice condensado do elemento (i, j) em uma matriz n x n na forma condensada.
@@ -128,195 +146,14 @@ struct Utils {
             return left - tri + (i - j - 1)
         }
     }
-    
-    struct PairKey: Hashable {
-        let u: Int
-        let v: Int
-        init(u: Int, v: Int) {
-            if u <= v { self.u = u; self.v = v } else { self.u = v; self.v = u }
-        }
-    }
 
-    final class LRUCache<Key: Hashable, Value> {
-        private final class Node {
-            let key: Key
-            var value: Value
-            var prev: Node?
-            var next: Node?
-            init(key: Key, value: Value) { self.key = key; self.value = value }
-        }
-
-        private var dict: [Key: Node] = [:]
-        private var head: Node?
-        private var tail: Node?
-        private let capacity: Int
-
-        init(capacity: Int = 256) { self.capacity = max(1, capacity) }
-
-        func get(_ key: Key) -> Value? {
-            guard let node = dict[key] else { return nil }
-            moveToHead(node)
-            return node.value
-        }
-
-        func set(_ value: Value, for key: Key) {
-            if let node = dict[key] {
-                node.value = value
-                moveToHead(node)
-                return
-            }
-            let node = Node(key: key, value: value)
-            dict[key] = node
-            addToHead(node)
-            if dict.count > capacity { removeTailIfNeeded() }
-        }
-
-        private func addToHead(_ node: Node) {
-            node.prev = nil
-            node.next = head
-            head?.prev = node
-            head = node
-            if tail == nil { tail = node }
-        }
-
-        private func moveToHead(_ node: Node) {
-            guard head !== node else { return }
-            // detach
-            node.prev?.next = node.next
-            node.next?.prev = node.prev
-            if tail === node { tail = node.prev }
-            // move to head
-            node.prev = nil
-            node.next = head
-            head?.prev = node
-            head = node
-        }
-
-        private func removeTailIfNeeded() {
-            guard let t = tail else { return }
-            dict[t.key] = nil
-            if let prev = t.prev {
-                prev.next = nil
-                tail = prev
-            } else {
-                head = nil
-                tail = nil
-            }
-        }
-    }
-    
-    /// Calcula a distância entre um cluster u e um cluster v usando o método Ward, com programação dinâmica.
-    /// - Parameters:
-    ///   - u: ID do cluster u.
-    ///   - v: ID do cluster v.
-    ///   - z: Matriz de ligação (cada linha: [filhoEsq, filhoDir, ..., tamanhoCluster]).
-    ///   - data: Dados originais (folhas), cada elemento é um vetor de Double.
-    ///   - cache: Cache LRU para distâncias já computadas.
-    /// - Returns: Distância entre os clusters u e v, ou nil se índices inválidos.
-    func distSub(u: Int, v: Int, z: [[Double]], data: [[Double]], cache: inout LRUCache<PairKey, Double>) -> Double? {
-        // Normaliza para u <= v
-        let u0 = min(u, v)
-        let v0 = max(u, v)
-        let key = PairKey(u: u0, v: v0)
-        let numFolhas = data.count
-
-        // Se já foi computado, retorna do cache
-        if let cached = cache.get(key) {
-            return cached
-        }
-
-        // Caso ambos sejam folhas
-        if u0 < numFolhas && v0 < numFolhas {
-            if let d = euclideanDist(a: data[u0], b: data[v0]) {
-                cache.set(d, for: key)
-                return d
-            } else {
-                return nil
-            }
-        }
-
-        // Função auxiliar para obter tamanho do cluster
-        func clusterSize(_ id: Int) -> Double {
-            if id < numFolhas { return 1.0 }
-            let row = id - numFolhas
-            if row >= 0 && row < z.count && z[row].count > 3 {
-                return z[row][3]
-            }
-            return 1.0
-        }
-
-        // Função auxiliar para obter filhos (s, t) de um cluster não-folha
-        func children(of id: Int) -> (Int, Int)? {
-            guard id >= numFolhas else { return nil }
-            let row = id - numFolhas
-            guard row >= 0 && row < z.count, z[row].count >= 2 else { return nil }
-            let s = Int(z[row][0])
-            let t = Int(z[row][1])
-            return (s, t)
-        }
-
-        // Se v é não-folha
-        if v0 >= numFolhas, let (s, t) = children(of: v0) {
-            let id_v = u0
-            let id_s = s
-            let id_t = t
-
-            let size_v = clusterSize(id_v)
-            let size_s = clusterSize(id_s)
-            let size_t = clusterSize(id_t)
-            let T = size_v + size_s + size_t
-
-            guard let d_vs = distSub(u: id_v, v: id_s, z: z, data: data, cache: &cache),
-                  let d_vt = distSub(u: id_v, v: id_t, z: z, data: data, cache: &cache),
-                  let d_st = distSub(u: id_s, v: id_t, z: z, data: data, cache: &cache) else {
-                return nil
-            }
-
-            var temp = ((size_v + size_s) / T) * (d_vs * d_vs)
-            temp += ((size_v + size_t) / T) * (d_vt * d_vt)
-            temp -= (size_v / T) * (d_st * d_st)
-            if abs(temp) < 1e-6 { temp = 0 }
-            let dist = sqrt(max(0, temp))
-            cache.set(dist, for: key)
-            return dist
-        }
-        // Caso contrário, u é não-folha
-        else if u0 >= numFolhas, let (s, t) = children(of: u0) {
-            let id_v = v0
-            let id_s = s
-            let id_t = t
-
-            let size_v = clusterSize(id_v)
-            let size_s = clusterSize(id_s)
-            let size_t = clusterSize(id_t)
-            let T = size_v + size_s + size_t
-
-            guard let d_vs = distSub(u: id_v, v: id_s, z: z, data: data, cache: &cache),
-                  let d_vt = distSub(u: id_v, v: id_t, z: z, data: data, cache: &cache),
-                  let d_st = distSub(u: id_s, v: id_t, z: z, data: data, cache: &cache) else {
-                return nil
-            }
-
-            var temp = ((size_v + size_s) / T) * (d_vs * d_vs)
-            temp += ((size_v + size_t) / T) * (d_vt * d_vt)
-            temp -= (size_v / T) * (d_st * d_st)
-            if abs(temp) < 1e-6 { temp = 0 }
-            let dist = sqrt(max(0, temp))
-            cache.set(dist, for: key)
-            return dist
-        }
-
-        // Se chegou aqui, algo está inconsistente
-        return nil
-    }
-    
     /// Retorna o número de elementos em um cluster.
     /// - Parameters:
     ///   - id: ID do cluster.
     ///   - z: Matriz de ligação atual (cada linha contém pelo menos 4 colunas; a quarta coluna é o tamanho do cluster).
     ///   - numFolhas: Número total de folhas (pontos) na base.
     /// - Returns: Número de elementos no cluster.
-    func getNumElements(id: Int, z: [[Double]], numFolhas: Int) -> Int {
+    func getNumElements(id: Int, z: [[Float]], numFolhas: Int) -> Int {
         if id < numFolhas { return 1 }
         let row = id - numFolhas
         guard row >= 0, row < z.count, z[row].count > 3 else { return 1 }
@@ -324,120 +161,17 @@ struct Utils {
         return Int(z[row][3])
     }
     
-    /// Implementa o agrupamento hierárquico considerando apenas pares adjacentes (método de Ward com distância euclidiana).
-    /// - Parameter data: Dados de entrada no formato [[Double]] (n amostras x m atributos).
-    /// - Returns: Matriz de ligação no formato (n - 1) x 4: [filhoEsq, filhoDir, distancia, tamanhoCluster].
-    func linkageAdjacentWard(data: [[Double]]) -> [[Double]] {
-        let nSamples = data.count
-        guard nSamples >= 2 else { return [] }
-
-        // Matriz de ligação Z (nSamples - 1) x 4
-        var z = Array(repeating: Array(repeating: 0.0, count: 4), count: nSamples - 1)
-
-        // Clusters iniciais: 0..nSamples-1
-        var clusters = Array(0..<nSamples)
-
-        // Cache LRU para distâncias
-        var cache = LRUCache<PairKey, Double>(capacity: 512)
-
-        // Loop principal
-        for i in 0..<(nSamples - 1) {
-            // Distâncias entre pares adjacentes atuais
-            let pairsCount = clusters.count - 1
-            var dists = Array(repeating: 0.0, count: max(0, pairsCount))
-            if pairsCount > 0 {
-                for j in 0..<pairsCount {
-                    if let d = distSub(u: clusters[j], v: clusters[j + 1], z: z, data: data, cache: &cache) {
-                        dists[j] = d
-                    } else {
-                        dists[j] = Double.greatestFiniteMagnitude
-                    }
-                }
-            }
-
-            // Encontra o índice do menor valor em dists
-            var idx = 0
-            if !dists.isEmpty {
-                var minVal = dists[0]
-                for k in 1..<dists.count {
-                    if dists[k] < minVal { minVal = dists[k]; idx = k }
-                }
-                let minDist = dists[idx]
-
-                // Número de elementos resultantes da união
-                let numElem = Double(getNumElements(id: clusters[idx], z: z, numFolhas: nSamples) +
-                                     getNumElements(id: clusters[idx + 1], z: z, numFolhas: nSamples))
-
-                // Atualiza a matriz de ligação: [filhoEsq, filhoDir, distancia, tamanho]
-                z[i][0] = Double(clusters[idx])
-                z[i][1] = Double(clusters[idx + 1])
-                z[i][2] = minDist
-                z[i][3] = numElem
-
-                // Atualiza os clusters: remove os dois e insere o novo id (nSamples + i)
-                clusters.remove(at: idx)
-                clusters.remove(at: idx) // remove o que ficou na posição idx após a 1ª remoção
-                clusters.insert(nSamples + i, at: idx)
-            }
-        }
-
-        return z
-    }
-    
-    /// Implementação customizada de fcluster: gera rótulos planos a partir da matriz de ligação.
-    /// - Parameters:
-    ///   - Z: Matriz de ligação (cada linha: [esquerda, direita, distância, contagem]).
-    ///   - t: Limiar usado para decidir até qual fusão processar.
-    /// - Returns: Vetor de rótulos (1..k) para cada ponto original.
-    func fclusterCustom(Z: [[Double]], t: Double) -> [Int] {
-        // n = Z.shape[0] + 1
-        let n = Z.count + 1
-        if n == 0 { return [] }
-
-        // Inicializa os rótulos: cada ponto começa em seu próprio cluster
-        var labels = Array(0..<n)
-        var clusterId = n
-
-        // Processa cada fusão até o limite (n - t)
-        // No Python, range(n - t) com t float é ambíguo; aqui usamos floor de (n - t)
-        let limit = max(0, Int(floor(Double(n) - t)))
-        if limit > 0 {
-            for i in 0..<min(limit, Z.count) {
-                let row = Z[i]
-                if row.count < 2 { continue }
-                let left = Int(row[0])
-                let right = Int(row[1])
-
-                for j in 0..<labels.count {
-                    if labels[j] == left || labels[j] == right {
-                        labels[j] = clusterId
-                    }
-                }
-                clusterId += 1
-            }
-        }
-
-        // Renumera rótulos para serem consecutivos a partir de 1
-        let uniqueSorted = Array(Set(labels)).sorted()
-        var mapping: [Int: Int] = [:]
-        for (newId, oldId) in uniqueSorted.enumerated() {
-            mapping[oldId] = newId + 1
-        }
-        let finalLabels = labels.map { mapping[$0] ?? 0 }
-        return finalLabels
-    }
-    
-    // Converter MLShapedArray<Float> 1xNxF em [[Double]]
-    func shapedArrayTo2D(_ arr: MLShapedArray<Float>) -> [[Double]] {
+    // Converter MLShapedArray<Float> 1xNxF em [[Float]]
+    func shapedArrayTo2D(_ arr: MLShapedArray<Float>) -> [[Float]] {
         precondition(arr.shape.count == 3 && arr.shape[0] == 1, "Esperado shape [1, N, F]")
         let n = arr.shape[1]
         let f = arr.shape[2]
-        var result = Array(repeating: Array(repeating: 0.0, count: f), count: n)
+        var result = Array(repeating: Array(repeating: Float(0.0), count: f), count: n)
         for i in 0..<n {
             for j in 0..<f {
-                // arr[0, i, j] -> MLShapedArray.Scalar? (Float?), convertemos para Double
+                // arr[0, i, j] -> MLShapedArray.Scalar? (Float?), convertemos para Float
                 if let v = arr[0, i, j].scalar {
-                    result[i][j] = Double(v)
+                    result[i][j] = v
                 } else {
                     result[i][j] = 0.0
                 }
@@ -446,31 +180,330 @@ struct Utils {
         return result
     }
     
-    // Converte [[Double]] para Data (apenas bytes, sem metadados)
-    func double2DToDataRaw(_ matrix: [[Double]]) -> Data {
-        // Flatten row-major
-        let flat = matrix.flatMap { $0 }
-        return flat.withUnsafeBufferPointer { Data(buffer: $0) }
-    }
-    
-    // Reconstrói [[Double]] a partir de Data e metadados (rows/cols)
-    func dataToDouble2DRaw(_ data: Data, rows: Int, cols: Int) -> [[Double]] {
-        precondition(rows >= 0 && cols >= 0, "Dimensões inválidas")
-        let count = rows * cols
-        let array: [Double] = data.withUnsafeBytes {
-            Array(UnsafeBufferPointer<Double>(
-                start: $0.baseAddress!.assumingMemoryBound(to: Double.self),
-                count: count
-            ))
-        }
-        var result: [[Double]] = []
-        result.reserveCapacity(rows)
-        for r in 0..<rows {
-            let start = r * cols
-            let end = start + cols
-            result.append(Array(array[start..<end]))
+    // Converte [[Float]] para flat [Float] (row-major)
+    func flattenFloat2D(_ matrix: [[Float]]) -> [Float] {
+        guard !matrix.isEmpty else { return [] }
+        var result: [Float] = []
+        let cols = matrix[0].count
+        result.reserveCapacity(matrix.count * cols)
+        for row in matrix {
+            result.append(contentsOf: row)
         }
         return result
     }
-}
+    
+    // MARK: - Data Conversion (Float ↔ Data)
+    
+    /// Converte array flat de Float para Data (raw bytes).
+    /// Usado para salvar features em Core Data de forma eficiente.
+    func flatFloatToData(_ buffer: [Float]) -> Data {
+        return buffer.withUnsafeBufferPointer { Data(buffer: $0) }
+    }
+    
+    /// Converte Data (raw bytes) para matriz 2D de Float.
+    /// Usado para reconstruir features do Core Data.
+    func dataToFloat2D(_ data: Data, rows: Int, cols: Int) -> [[Float]] {
+        precondition(rows >= 0 && cols >= 0, "Invalid dimensions")
+        let count = rows * cols
+        
+        // Converte Data → [Float] flat
+        let flatBuffer = data.withUnsafeBytes {
+            Array(UnsafeBufferPointer<Float>(
+                start: $0.baseAddress!.assumingMemoryBound(to: Float.self),
+                count: count
+            ))
+        }
+        
+        // Converte [Float] flat → [[Float]] 2D
+        var result: [[Float]] = []
+        result.reserveCapacity(rows)
+        
+        for r in 0..<rows {
+            var row: [Float] = []
+            row.reserveCapacity(cols)
+            for c in 0..<cols {
+                row.append(flatBuffer[r * cols + c])
+            }
+            result.append(row)
+        }
+        return result
+    }
+    
+    // MARK: - Unsafe Buffer Operations (Performance Critical)
 
+    /// Cria uma view (sem cópia) de uma linha em um buffer flat.
+    /// Usado no clustering para evitar alocações desnecessárias.
+    func rowSliceFloat(buffer: [Float], cols: Int, row: Int) -> UnsafeBufferPointer<Float> {
+        let start = row * cols
+        return buffer.withUnsafeBufferPointer { ptr in
+            let base = ptr.baseAddress! + start
+            return UnsafeBufferPointer(start: base, count: cols)
+        }
+    }
+    
+    /// Variante de linkage com parada antecipada: interrompe quando restarem k clusters.
+    /// IMPORTANTE: Para datasets grandes, use downsample ANTES de chamar este método!
+    /// - Parameters:
+    ///   - matrix: Matriz 2D de Float contendo os dados (N x F).
+    ///   - k: Número alvo de clusters finais (k >= 1).
+    /// - Returns: Matriz de ligação parcial (até n-k merges) no formato [left, right, dist, size].
+    func linkageAdjacentWard(_ matrix: [[Float]], stopAtK k: Int) -> [[Float]] {
+        guard !matrix.isEmpty else { return [] }
+        let nSamples = matrix.count
+        guard nSamples >= 2 else { return [] }
+        
+        // CRITICAL: Safety check to prevent excessive memory usage
+        // For N samples, dist dictionary can grow to ~N entries (adjacent + Ward updates)
+        // Memory ~ N × 20 bytes per entry
+        let maxSafeSamples = 2000  // ~40 KB for dist + reasonable compute time
+        if nSamples > maxSafeSamples {
+            print("[WARNING] linkageAdjacentWard: Input has \(nSamples) samples (max recommended: \(maxSafeSamples)). Consider more aggressive downsampling!")
+        }
+        
+        let kClamped = max(1, min(k, nSamples))
+        
+        // Prepare flat buffer for efficient row access
+        let cols = matrix[0].count
+        let buffer = flattenFloat2D(matrix)
+
+        // Matriz de ligação Z (no máximo nSamples - 1 merges)
+        var z = Array(repeating: Array(repeating: Float(0.0), count: 4), count: nSamples - 1)
+
+        // Clusters iniciais: 0..nSamples-1
+        var clusters = Array(0..<nSamples)
+
+        var clusterSize: [Int: Float] = [:]
+        for i in 0..<nSamples { clusterSize[i] = 1.0 }
+        
+        // OPTIMIZATION: Only compute distances on-demand instead of all N×N upfront
+        var dist: [PairKey: Float] = [:]
+        
+        // Helper to compute or retrieve distance (lazy evaluation)
+        func getDistance(_ u: Int, _ v: Int) -> Float {
+            let key = PairKey(u: u, v: v)
+            if let cached = dist[key] { return cached }
+            
+            // Compute on-demand for original samples only
+            if u < nSamples && v < nSamples {
+                let ai = rowSliceFloat(buffer: buffer, cols: cols, row: u)
+                let bj = rowSliceFloat(buffer: buffer, cols: cols, row: v)
+                let d2 = squaredEuclideanFloat(ai, bj)
+                let d = sqrt(d2)
+                dist[key] = d
+                return d
+            }
+            return Float.greatestFiniteMagnitude
+        }
+
+        // Versão para controle de validade dos pares na heap
+        var aliveVersion = Array(repeating: 0, count: 2 * nSamples)
+
+        // Heap mínimo para pares adjacentes (usando Double apenas para AdjPair)
+        var heap = BinaryMinHeap<AdjPair>()
+
+        // Construir heap inicial com distâncias entre pares adjacentes APENAS
+        if clusters.count > 1 {
+            for j in 0..<(clusters.count - 1) {
+                let left = clusters[j]
+                let right = clusters[j + 1]
+                let v = max(aliveVersion[left], aliveVersion[right])
+                let d = getDistance(left, right)  // Lazy compute only adjacent pairs
+                heap.insert(AdjPair(left: left, right: right, dist: d, version: v))
+            }
+        }
+
+        // Número de merges que precisamos executar para parar em k clusters: nSamples - k
+        let mergesToDo = nSamples - kClamped
+        var performed = 0
+
+        while performed < mergesToDo {
+            var minPair: AdjPair? = nil
+            var pos: Int? = nil
+
+            // Encontrar o par válido no heap
+            while let pair = heap.popMin() {
+                if pair.version != max(aliveVersion[pair.left], aliveVersion[pair.right]) {
+                    continue
+                }
+                if let p = clusters.firstIndex(of: pair.left), p + 1 < clusters.count, clusters[p + 1] == pair.right {
+                    minPair = pair
+                    pos = p
+                    break
+                }
+            }
+
+            guard let pair = minPair, let p = pos else { break }
+
+            let minDist = Float(pair.dist)
+            let numElem = clusterSize[pair.left, default: 1.0] + clusterSize[pair.right, default: 1.0]
+
+            z[performed][0] = Float(clusters[p])
+            z[performed][1] = Float(clusters[p + 1])
+            z[performed][2] = minDist
+            z[performed][3] = numElem
+
+            // Atualiza os clusters: remove os dois e insere o novo id (nSamples + performed)
+            clusters.remove(at: p)
+            clusters.remove(at: p)
+            let newId = nSamples + performed
+            clusters.insert(newId, at: p)
+
+            let sizeLeft = clusterSize[pair.left] ?? 1.0
+            let sizeRight = clusterSize[pair.right] ?? 1.0
+            clusterSize[newId] = sizeLeft + sizeRight
+            clusterSize[pair.left] = nil
+            clusterSize[pair.right] = nil
+
+            aliveVersion[newId] = max(aliveVersion[pair.left], aliveVersion[pair.right]) + 1
+
+            // Remove dist entries for merged clusters with other clusters
+            for c in clusters where c != newId {
+                dist[PairKey(u: pair.left, v: c)] = nil
+                dist[PairKey(u: pair.right, v: c)] = nil
+            }
+            dist[PairKey(u: pair.left, v: pair.right)] = nil
+
+            // Update distances with new cluster using Ward formula
+            for c in clusters where c != newId {
+                let sizeA = sizeLeft
+                let sizeB = sizeRight
+                let sizeC = clusterSize[c] ?? 1.0
+                
+                // Use cached or lazy-computed distances
+                let keyAC = PairKey(u: pair.left, v: c)
+                let keyBC = PairKey(u: pair.right, v: c)
+                let dAC = dist[keyAC] ?? getDistance(pair.left, c)
+                let dBC = dist[keyBC] ?? getDistance(pair.right, c)
+                let dAB = minDist
+                
+                let T = sizeA + sizeB + sizeC
+                let newDistSquared = ((sizeC + sizeA) / T) * dAC * dAC + ((sizeC + sizeB) / T) * dBC * dBC - (sizeC / T) * dAB * dAB
+                let newDist = sqrt(max(0, newDistSquared))
+                dist[PairKey(u: newId, v: c)] = newDist
+            }
+
+            // Atualiza pares adjacentes afetados
+            if p - 1 >= 0 {
+                let leftNeighbor = clusters[p - 1]
+                let rightNeighbor = newId
+                let v = max(aliveVersion[leftNeighbor], aliveVersion[rightNeighbor])
+                let key = PairKey(u: leftNeighbor, v: rightNeighbor)
+                let d = dist[key] ?? getDistance(leftNeighbor, rightNeighbor)
+                heap.insert(AdjPair(left: leftNeighbor, right: rightNeighbor, dist: d, version: v))
+            }
+            if p + 1 < clusters.count {
+                let leftNeighbor = newId
+                let rightNeighbor = clusters[p + 1]
+                let v = max(aliveVersion[leftNeighbor], aliveVersion[rightNeighbor])
+                let key = PairKey(u: leftNeighbor, v: rightNeighbor)
+                let d = dist[key] ?? getDistance(leftNeighbor, rightNeighbor)
+                heap.insert(AdjPair(left: leftNeighbor, right: rightNeighbor, dist: d, version: v))
+            }
+
+            performed += 1
+        }
+
+        // Retorna apenas as linhas preenchidas (performed merges)
+        if performed < z.count {
+            return Array(z.prefix(performed))
+        }
+        return z
+    }
+    
+    /// Downsampling temporal simples por média em janelas fixas.
+    /// - Parameters:
+    ///   - buffer: Buffer flat de Float (row-major) contendo os dados (N x F).
+    ///   - rows: Número de linhas (amostras).
+    ///   - cols: Número de colunas (features).
+    ///   - window: Tamanho da janela (>= 1).
+    /// - Returns: Buffer flat de Float com sinais reduzidos por média de janela e o novo número de linhas.
+    func downsampleMean(buffer: [Float], rows: Int, cols: Int, window: Int) -> (buffer: [Float], rows: Int) {
+        guard rows > 0, cols > 0, window > 1 else { return (buffer, rows) }
+        
+        var result: [Float] = []
+        result.reserveCapacity((rows / window + 1) * cols)
+        var newRows = 0
+        var i = 0
+        
+        while i < rows {
+            let end = min(rows, i + window)
+            var acc = Array(repeating: Float(0.0), count: cols)
+            let windowSize = end - i
+            
+            for r in i..<end {
+                for c in 0..<cols {
+                    acc[c] += buffer[r * cols + c]
+                }
+            }
+            
+            let divisor = Float(windowSize)
+            for c in 0..<cols {
+                result.append(acc[c] / divisor)
+            }
+            newRows += 1
+            i = end
+        }
+        
+        return (result, newRows)
+    }
+    
+    /// Versão de downsample que aceita [[Float]] e retorna [[Float]]
+    func downsampleMean(_ matrix: [[Float]], window: Int) -> [[Float]] {
+        guard !matrix.isEmpty, window > 1 else { return matrix }
+        let cols = matrix[0].count
+        let flatBuffer = flattenFloat2D(matrix)
+        let (reducedBuffer, newRows) = downsampleMean(buffer: flatBuffer, rows: matrix.count, cols: cols, window: window)
+        
+        // Convert back to 2D
+        var result: [[Float]] = []
+        result.reserveCapacity(newRows)
+        for r in 0..<newRows {
+            var row: [Float] = []
+            row.reserveCapacity(cols)
+            for c in 0..<cols {
+                row.append(reducedBuffer[r * cols + c])
+            }
+            result.append(row)
+        }
+        return result
+    }
+    
+    /// Gera rótulos planos a partir de uma matriz de ligação parcial (Z parcial) resultante de parada antecipada.
+    /// - Parameters:
+    ///   - Z: Matriz de ligação parcial (cada linha: [esquerda, direita, distância, tamanho]). Deve conter as fusões realizadas, em ordem.
+    ///   - n: Número de folhas (pontos originais) na base dos dados.
+    /// - Returns: Vetor de rótulos (1..k) para cada ponto original, onde k = n - Z.count.
+    func fclusterFromPartialZ(Z: [[Float]], n: Int) -> [Int] {
+        // n = número de folhas (pontos originais)
+        guard n > 0 else { return [] }
+        if Z.isEmpty { return Array(repeating: 1, count: n) }
+
+        // Inicialmente, cada ponto é seu próprio cluster (id = índice da folha)
+        var labels = Array(0..<n)
+        var nextClusterId = n // ids de clusters mesclados começam após as folhas
+
+        // Aplica cada fusão na ordem em que ocorreu
+        for row in Z {
+            if row.count < 2 { continue }
+            let left = Int(row[0])
+            let right = Int(row[1])
+
+            // Todos os pontos cujo rótulo atual é left ou right passam a ter o novo id
+            for j in 0..<labels.count {
+                if labels[j] == left || labels[j] == right {
+                    labels[j] = nextClusterId
+                }
+            }
+            nextClusterId += 1
+        }
+
+        // Compacta os ids para faixa 1..k (ordem estável por ordenação crescente dos ids únicos)
+        let uniqueSorted = Array(Set(labels)).sorted()
+        var mapping: [Int: Int] = [:]
+        for (newId, oldId) in uniqueSorted.enumerated() {
+            mapping[oldId] = newId + 1
+        }
+        return labels.map { mapping[$0] ?? 0 }
+    }
+
+}

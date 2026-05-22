@@ -11,9 +11,9 @@ import SwiftUI
 struct SensorCard: View {
     let title: String
     let unit: String
-    let x: Double
-    let y: Double
-    let z: Double
+    let x: Float
+    let y: Float
+    let z: Float
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {

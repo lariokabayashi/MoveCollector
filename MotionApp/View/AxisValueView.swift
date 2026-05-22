@@ -9,7 +9,7 @@ import SwiftUI
 @available(iOS 26.0, *)
 struct AxisValue: View {
     let axis: String
-    let value: Double
+    let value: Float
 
     var body: some View {
         VStack(spacing: 2) {
