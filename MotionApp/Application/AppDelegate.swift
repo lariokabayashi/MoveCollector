@@ -23,6 +23,18 @@ class AppDelegate: UIResponder, UIApplicationDelegate, ObservableObject {
     // @Published para que, se algum dia uma View precisar reagir, baste observar.
     @Published var currentSessionId: UUID?
 
+    // MARK: - GPS snapshot (Etapa E)
+    //
+    // Cache do último fix conhecido. SensorManagerViewModel lê isto a cada
+    // tick (20 Hz) para preencher os 5 canais GPS do tensor de input do TFC.
+    // LocationManager escreve aqui em didUpdateLocations.
+    //
+    // Por que não @Published: o write é a 1 Hz e o read a 20 Hz; o sinal
+    // de mudança custaria 20 atualizações redundantes da UI por segundo.
+    // Acesso atômico via NSLock dentro do struct GPSSnapshotCache abaixo.
+    let gpsSnapshotCache = GPSSnapshotCache()
+    var lastGPSSnapshot: GPSSnapshotCache.Snapshot? { gpsSnapshotCache.get() }
+
     lazy var locationManager: LocationManagerViewModel = {
         let manager = LocationManagerViewModel(context: PersistenceController.shared.container.viewContext)
         // Wiring para Etapa B: LocationManager precisa saber qual sessão tagear.
@@ -131,13 +143,13 @@ class AppDelegate: UIResponder, UIApplicationDelegate, ObservableObject {
         // Keep updating progress just to keep iOS aware the task is alive
         let progress = task.progress
         progress.totalUnitCount = appConstants.totalTime // 30 min
-        DispatchQueue.global(qos: .background).async {
-            while !self.isUserStopped && !wasExpired && !progress.isFinished {
-                progress.completedUnitCount += 1
-                task.updateTitle("Collecting Data", subtitle: "Running...")
-                sleep(1)
-            }
+//        DispatchQueue.global(qos: .background).async {
+        while !self.isUserStopped && !wasExpired && !progress.isFinished {
+            progress.completedUnitCount += 1
+            task.updateTitle("Collecting Data", subtitle: "Running...")
+            sleep(1)
         }
+//        }
     }
     
     func stopBackgroundCollection() {

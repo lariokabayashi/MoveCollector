@@ -27,6 +27,7 @@ struct EpisodePoint: Identifiable {
 /// (o casamento é feito no ViewModel; aqui é só renderização).
 @available(iOS 26.0, *)
 struct EpisodesMapView: View {
+    @Environment(\.dismiss) private var dismiss
     let points: [EpisodePoint]
     /// Quantidade de cores na paleta (mesma do Python).
     private static let palette: [Color] = [
@@ -63,6 +64,18 @@ struct EpisodesMapView: View {
             }
         }
         .mapStyle(.standard(elevation: .realistic))
+        .overlay(alignment: .topLeading) {
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.headline)
+                    .padding(8)
+            }
+            .buttonStyle(.plain)
+            .background(.thinMaterial, in: Circle())
+            .padding(8)
+        }
         .overlay(alignment: .topTrailing) {
             // Mini-legenda com label → cor (igual à camada `LayerControl` do Folium).
             let uniqueLabels = Array(Set(points.map(\.label))).sorted()
@@ -84,3 +97,4 @@ struct EpisodesMapView: View {
         return palette[(max(0, label - 1)) % palette.count]
     }
 }
+

@@ -19,10 +19,20 @@ struct SensorGroupSample: Identifiable {
     let group: String
 }
 
+/// Uma série inteira por grupo (ex: "Accelerometer" → 2000 SensorGroupSample).
+/// Substitui o tuple-labeled `(name:, samples:)` — tuplas com labels em
+/// `@Published`/`@Binding` triggerizam stack overflow no MetadataCacheKey
+/// do runtime do Swift em algumas versões.
+struct SensorGroupSeries: Identifiable {
+    let id = UUID()
+    let name: String
+    let samples: [SensorGroupSample]
+}
+
 @available(iOS 26.0, *)
 struct CombinedSensorsChartView: View {
     /// Por grupo de canais (já agregados em média), um array de samples.
-    let groupSeries: [(name: String, samples: [SensorGroupSample])]
+    let groupSeries: [SensorGroupSeries]
     /// Episódios para desenhar boundaries verticais + faixa de IDs no topo.
     let episodes: [Episode]
     /// Timezone para o eixo X (mesmo papel do `America/Sao_Paulo` no Python).

@@ -20,7 +20,15 @@ struct AppConstants{
     let csvBufferSize = 10000                // Máximo de 10000 registros em memória (~8 min a 20 Hz)
     
     // MARK: - Processing Parameters
-    let windowSize = 60                // 6 sec @ 20 Hz (matches CNN model input)
+    //
+    // CRITICAL: windowSize está casado com o TFC_Backbone.mlpackage:
+    //   inputs x_t, x_f shape [1, 11, 300]  →  windowSize = 300, nChannels = 11.
+    // 300 samples @ 20 Hz = 15 segundos por janela. Não overlapping (step = window),
+    // mesmo critério da pipeline Python de referência.
+    let windowSize = 300               // 15 sec @ 20 Hz (matches TFC_Backbone input)
+    let stepSize = 300                 // sem overlap (idêntico ao Python step_size = window_size)
+    let nChannels = 11                 // 11 features: acc xyz + gyro xyz + lat + lon + alt + hAcc + vAcc
+    let embeddingDim = 256             // concat(z_t [128], z_f [128])
     let saveThreshold = 100            // Save every 100 seconds to prevent memory buildup
     let totalTime = .max as Int64
     

@@ -48,9 +48,6 @@ class LocationManagerViewModel: NSObject, CLLocationManagerDelegate {
     init(context: NSManagedObjectContext) {
         self.viewContext = context
 
-        // Inicializa writeContext em init (chamado pela closure lazy do
-        // AppDelegate, garantidamente em main queue). Necessário porque
-        // PersistenceController.container está marcado @MainActor.
         let ctx = PersistenceController.shared.container.newBackgroundContext()
         ctx.automaticallyMergesChangesFromParent = false
         ctx.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
@@ -143,6 +140,14 @@ class LocationManagerViewModel: NSObject, CLLocationManagerDelegate {
             // Timestamp do fix GPS (não do callback) em Int64 ms — bate
             // com o schema de SensorReading p/ merge sincronizado no export.
             let timestampMs = Int64(loc.timestamp.timeIntervalSince1970 * 1000)
+
+            // Etapa E: alimentar cache lido pelo SensorManager a 20 Hz para
+            // preencher os 5 canais GPS no tensor de input do TFC. Independe
+            // de sessionId — útil também se quisermos clusterizar sem persistir.
+            appDelegate?.gpsSnapshotCache.update(.init(
+                latitude: latitude, longitude: longitude, altitude: altitude,
+                horizontalAccuracy: hAcc, verticalAccuracy: vAcc
+            ))
 
             print("📍 GPS @ session \(sessionId.uuidString.prefix(8))…  "
                   + "ts=\(timestampMs) lat=\(latitude) lon=\(longitude) "
