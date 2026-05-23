@@ -247,6 +247,17 @@ struct Utils {
     ///   - matrix: Matriz 2D de Float contendo os dados (N x F).
     ///   - k: Número alvo de clusters finais (k >= 1).
     /// - Returns: Matriz de ligação parcial (até n-k merges) no formato [left, right, dist, size].
+    ///
+    /// PARIDADE COM PYTHON (`linkage_adjacent_ward`):
+    /// - Ordem dos filhos no Z: Python preserva (clusters[idx], clusters[idx+1])
+    ///   na ordem em que aparecem no array — mantemos o mesmo aqui (clusters[p], clusters[p+1]).
+    /// - Fórmula Ward sobre distâncias entre clusters:
+    ///     d(c, novo)² = ((|c|+|A|)/T) d(c,A)² + ((|c|+|B|)/T) d(c,B)² - (|c|/T) d(A,B)²
+    ///   com T = |c| + |A| + |B|. Idêntico ao `dist_sub` recursivo do Python.
+    /// - Distância base: euclidiana NÃO-ao-quadrado (sqrt do somatório).
+    /// - Empate: `argmin` do numpy retorna o PRIMEIRO mínimo em ordem; o heap
+    ///   Swift retorna em ordem de inserção (estabilidade preservada para
+    ///   distâncias iguais — vale conferir em coletas reais).
     func linkageAdjacentWard(_ matrix: [[Float]], stopAtK k: Int) -> [[Float]] {
         guard !matrix.isEmpty else { return [] }
         let nSamples = matrix.count
@@ -473,6 +484,13 @@ struct Utils {
     ///   - Z: Matriz de ligação parcial (cada linha: [esquerda, direita, distância, tamanho]). Deve conter as fusões realizadas, em ordem.
     ///   - n: Número de folhas (pontos originais) na base dos dados.
     /// - Returns: Vetor de rótulos (1..k) para cada ponto original, onde k = n - Z.count.
+    ///
+    /// PARIDADE COM PYTHON (`fcluster_custom`):
+    /// - Python aplica `n - t` merges (onde t é o número alvo de clusters);
+    ///   aqui, como Z já vem com `n - k` linhas vindas de `linkageAdjacentWard(stopAtK: k)`,
+    ///   aplicamos TODAS as linhas de Z (= mesmo número de merges).
+    /// - O remap final (1..k) ordena por id crescente, exatamente como o
+    ///   `mapping = {old: new for new, old in enumerate(unique_labels, 1)}`.
     func fclusterFromPartialZ(Z: [[Float]], n: Int) -> [Int] {
         // n = número de folhas (pontos originais)
         guard n > 0 else { return [] }

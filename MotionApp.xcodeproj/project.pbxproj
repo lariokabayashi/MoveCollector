@@ -61,11 +61,6 @@
 			path = MotionApp;
 			sourceTree = "<group>";
 		};
-		058863B32FB35210003A485B /* Documentation */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			path = Documentation;
-			sourceTree = "<group>";
-		};
 		05E61FD52EC9F6E20027C95D /* UnitTest */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = UnitTest;
@@ -110,7 +105,6 @@
 				05E61FD52EC9F6E20027C95D /* UnitTest */,
 				05E61FE22EC9F7240027C95D /* UITest */,
 				0568E37A2E95412100A25A5B /* Products */,
-				058863B32FB35210003A485B /* Documentation */,
 			);
 			sourceTree = "<group>";
 		};
@@ -142,7 +136,6 @@
 			);
 			fileSystemSynchronizedGroups = (
 				0568E37B2E95412100A25A5B /* MotionApp */,
-				058863B32FB35210003A485B /* Documentation */,
 			);
 			name = MotionApp;
 			packageProductDependencies = (

@@ -120,6 +120,41 @@ struct CombinedSensorGPSData {
     }
 }
 
+/// Cache thread-safe escrito pelo LocationManager (1 Hz) e lido pelo
+/// SensorManager (20 Hz) durante coleta. Conteúdo do último fix conhecido
+/// é usado para preencher os 5 canais GPS do tensor de input do TFC.
+///
+/// Por que não Atomic / actor: somos 20 r/s + 1 w/s — overhead de NSLock é
+/// trivial e a interface fica sincrônica (não-async), evitando contaminar
+/// a pipeline de coleta com `await`.
+final class GPSSnapshotCache {
+    struct Snapshot {
+        let latitude: Float
+        let longitude: Float
+        let altitude: Float
+        let horizontalAccuracy: Float
+        let verticalAccuracy: Float
+    }
+
+    private var snap: Snapshot?
+    private let lock = NSLock()
+
+    func update(_ s: Snapshot) {
+        lock.lock(); defer { lock.unlock() }
+        snap = s
+    }
+
+    func get() -> Snapshot? {
+        lock.lock(); defer { lock.unlock() }
+        return snap
+    }
+
+    func clear() {
+        lock.lock(); defer { lock.unlock() }
+        snap = nil
+    }
+}
+
 /// Cache thread-safe para último GPS conhecido (para repetir entre updates de sensores)
 class GPSCache {
     private var lastGPS: GPSSnapshot?

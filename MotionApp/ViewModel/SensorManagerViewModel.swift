@@ -8,8 +8,16 @@
 //  - Removido: combinedDataBuffer em memória, persistência de FeatureMatrix
 //  - Adicionado: escrita incremental de SensorReading em contexto background dedicado,
 //    com batching por saveThreshold e tag de sessionId por coleta
-//  - Mantido: pipeline CNN em tempo real (mlBufferTimed → run_CNN_PFF_2D_backbone)
-//    com acumulador em memória (rolling) para alimentar runDailyClustering
+//
+//  Refatorado (Etapa E — TFC migration) — 2026-05-22:
+//  - Removido: CNN_PFF_2D_backbone + data2D + data2DAccumulator (feature maps por tick)
+//  - Adicionado: TFCFeatureExtractor (TFC_Backbone.mlpackage) com embeddings
+//    256-d (concat z_t + z_f) por JANELA (não por tick).
+//  - Adicionado: GPS entra como canal feature (lat, lon, alt, hAcc, vAcc) —
+//    pipeline 11-canal igual ao Python.
+//  - Adicionado: windowTimestamps acumulator (Int64 ms) preserva timestamp
+//    de início de cada janela — usado pelo EpisodeBuilder.
+//  - Mudou: runDailyClustering devolve `[Episode]` direto, não só rótulos.
 //
 
 import SwiftUI
@@ -40,11 +48,6 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
     /// isolando-as do main queue (UI) e de qualquer outra escrita (LocationManager).
     /// Como aplicar: todas as escritas usam writeContext.perform { ... } para
     /// hopar para a fila correta antes de tocar objetos managed.
-    ///
-    /// Por quê não é lazy: PersistenceController.container está marcado @MainActor.
-    /// Inicializar aqui no init (chamado pela closure lazy do AppDelegate, em main
-    /// queue) garante que .newBackgroundContext() seja invocado em MainActor.
-    /// A partir daí o contexto é livre para uso via .perform em qualquer thread.
     private let writeContext: NSManagedObjectContext
 
     // MARK: - Session tagging
@@ -71,31 +74,55 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
     /// writeContext, esperando o próximo flush.
     private var pendingInserts: Int = 0
 
-    // MARK: - ML Model (inalterado)
-    private var cnn_pff_2D_backbone: CNN_PFF_2D_backbone?
-    private var mlBufferTimed: [Sample] = []     // sliding window com timestamps
+    // MARK: - ML Model (TFC_Backbone — substitui CNN_PFF_2D antigo)
+    //
+    // CRITICAL: o buffer agora acumula 11 canais (acc xyz + gyro xyz + GPS 5x).
+    // Substitui o antigo `mlBufferTimed: [Sample]` (6 canais).
+    private var tfcExtractor: TFCFeatureExtractor?
+
+    /// Buffer de amostras crus por janela. Cada entrada é um snapshot de 11 floats
+    /// no instante da amostra. Quando atinge `windowSize` (= 300 @ 20 Hz = 15s),
+    /// um embedding é gerado e o buffer é zerado (step = window, sem overlap).
+    private var windowBuffer: [Float] = []
+    /// Timestamps em ms para cada amostra acumulada no `windowBuffer`.
+    /// Quando a janela fecha, `windowTimestamps.append(buffer[0])`.
+    private var windowSampleTimestamps: [Int64] = []
 
     @Published var mlStatusMessage: String = ""
     @Published var mlIsReady: Bool = false
 
-    /// Último resultado da CNN. Mantido por compatibilidade com UI / debug.
-    private var data2D: [[Float]] = []
-    private let data2DLock = NSLock()
+    /// Acumulador de embeddings (256-d, flat row-major) — UM por janela fechada.
+    /// Substitui completamente o antigo `data2DAccumulator` (feature maps por tick).
+    /// Cap: 4000 janelas × 256d × 4 bytes ≈ 4 MB → cobre 4000 × 15s ≈ 16 h de coleta.
+    private var embeddingsAccumulator: [Float] = []
+    private var windowTimestamps: [Int64] = []
+    private let embeddingsLock = NSLock()
+    private let embeddingsCapWindows = 4000
 
-    /// Acumulador rolante de outputs da CNN para alimentar runDailyClustering
-    /// sem precisar persistir FeatureMatrix.
-    /// Cap deliberadamente conservador: a CNN dispara a cada amostra após a
-    /// janela inicial (20 Hz), então um cap de 10000 cobre ~8min de histórico.
-    /// Para mais que isso, runDailyClustering veria janela truncada — limitação
-    /// aceita conforme escopo da Etapa A (FeatureMatrix não persiste mais).
-    private var data2DAccumulator: [[Float]] = []
-    private let data2DAccumulatorLock = NSLock()
-    private let data2DAccumulatorCap = 10_000
+    /// Fila serial dedicada ao pipeline TFC (window-buffering + inferência).
+    /// Por quê: a inferência CoreML pode levar dezenas de ms; rodar na main
+    /// causaria stutter a cada 15s (uma janela = 15s @ 20Hz). Por quê serial:
+    /// `windowBuffer` é único — duas inferências em paralelo embaralhariam os
+    /// snapshots. QoS `.userInitiated` (não `.background`) para o ANE não
+    /// fazer scheduling adverso.
+    private let tfcQueue = DispatchQueue(label: "com.movecollector.tfc.pipeline",
+                                          qos: .userInitiated)
 
     // MARK: - Publicado para UI
     @Published var linkageMatrix: [[Float]] = []
     @Published var clusterLabels: [Int] = []
+    @Published var episodes: [Episode] = []
     @Published var buffer: [[[Float]]] = []   // mantido para compatibilidade da UI
+
+    /// Séries por grupo para o `CombinedSensorsChartView` — uma entrada por
+    /// grupo (Accelerometer, Gyroscope), cada uma com a lista de samples
+    /// (Date, valor médio dos canais do grupo) já downsampled para plot.
+    /// Populado por `populateGroupSeries(forSession:)` após `runDailyClustering`.
+    ///
+    /// PORQUÊ struct e não `[(name:, samples:)]`: tuples com labels nomeados em
+    /// @Published triggerizam stack overflow no MetadataCacheKey do runtime
+    /// (EXC_BAD_ACCESS code=2 em libswiftCore.dylib). Struct nomeado evita.
+//    @Published var groupSeries: [SensorGroupSeries] = []
 
     @Published var isRecording = false
     @Published var accelX: Float = 0
@@ -121,14 +148,19 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
         super.init()
 
         do {
-            let model = try CNN_PFF_2D_backbone()
-            self.cnn_pff_2D_backbone = model
-            self.mlIsReady = true
-            self.mlStatusMessage = "ML model loaded"
+            let extractor = try TFCFeatureExtractor()
+            DispatchQueue.main.async {
+                self.tfcExtractor = extractor
+                self.mlIsReady = true
+                self.mlStatusMessage = "TFC model loaded"
+            }
         } catch {
-            self.mlIsReady = false
-            self.mlStatusMessage = "Failed to load ML model: \(error.localizedDescription)"
-            print("[ML] Model load error:", error)
+            DispatchQueue.main.async {
+                self.tfcExtractor = nil
+                self.mlIsReady = false
+                self.mlStatusMessage = "Failed to load TFC model: \(error.localizedDescription)"
+            }
+            print("[TFC] Model load error:", error)
         }
     }
 
@@ -183,12 +215,17 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
         motionManager.stopGyroUpdates()
         motionManager.stopDeviceMotionUpdates()
 
-        // Limpar buffers em memória
-        mlBufferTimed.removeAll(keepingCapacity: false)
+        // Limpar buffers em memória — sync na tfcQueue para garantir que
+        // não há inferência em curso quando zeramos `windowBuffer`.
+        tfcQueue.sync {
+            windowBuffer.removeAll(keepingCapacity: false)
+            windowSampleTimestamps.removeAll(keepingCapacity: false)
+        }
 
-        data2DLock.lock()
-        data2D.removeAll(keepingCapacity: false)
-        data2DLock.unlock()
+        // Embeddings + windowTimestamps NÃO são limpos aqui: ficam disponíveis
+        // para `runDailyClustering` rodar pós-stop (uso normal: stop → cluster).
+        // Limpeza explícita acontece em `resetEmbeddings()` (chamado pela UI
+        // ao iniciar uma nova coleta, se desejado).
 
         // Captura sessionId encerrada ANTES de qualquer clear, p/ o export e
         // p/ logs do flush. Não pode acontecer depois — currentSessionId já
@@ -271,7 +308,20 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
             )
         }
 
-        // 2) UI updates + pipeline CNN — precisam de main queue por causa de @Published.
+        // 2) UI updates + pipeline TFC — precisam de main queue por causa de @Published.
+        // Snapshot do último GPS conhecido (cache no AppDelegate / LocationManager).
+        // Por que aceitar zeros como fallback: o backbone foi treinado com 11
+        // canais inteiros; passar NaN ou nil quebraria. Zeros após normalização
+        // viram a média global do canal, que é o "comportamento neutro" mais
+        // próximo de "sem informação".
+        let snap = appDelegate?.lastGPSSnapshot
+        let lat = snap?.latitude ?? 0
+        let lon = snap?.longitude ?? 0
+        let alt = snap?.altitude ?? 0
+        let hAcc = snap?.horizontalAccuracy ?? 0
+        let vAcc = snap?.verticalAccuracy ?? 0
+
+        // UI updates → main queue (Published).
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.accelX = ax
@@ -281,11 +331,17 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
             self.gyroY = gy
             self.gyroZ = gz
             self.batteryLevel = battery
+        }
 
-            self.appendToMLBuffer(
-                timestamp: tEpoch,
+        // Window buffering + TFC inference → fila serial dedicada.
+        // Não atravessa a main queue → não causa jank a cada 15 s.
+        tfcQueue.async { [weak self] in
+            guard let self = self else { return }
+            self.appendWindowSample(
+                timestampMs: timestampMs,
                 ax: ax, ay: ay, az: az,
-                gx: gx, gy: gy, gz: gz
+                gx: gx, gy: gy, gz: gz,
+                lat: lat, lon: lon, alt: alt, hAcc: hAcc, vAcc: vAcc
             )
         }
     }
@@ -342,127 +398,321 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
         }
     }
 
-    // MARK: - Pipeline CNN (inalterado, exceto pelo acumulador)
+    // MARK: - Pipeline TFC (substitui o CNN antigo)
+    //
+    // PARIDADE COM PYTHON (FeatureExtractor):
+    // - Janelas NÃO overlapping (step = window). O Python usa
+    //   `step_size = window_size = 300` no FeatureExtractor.
+    // - Por janela: feed `(x_t, x_f=|FFT|(x_t))` no backbone, lê `z_t`+`z_f`,
+    //   concatena → embedding 256-d. Acumula um por janela.
+    // - Timestamp da janela = ts da PRIMEIRA amostra da janela. Mantemos a
+    //   mesma definição em `windowTimestamps` para que o EpisodeBuilder
+    //   reproduza os boundaries do Python.
 
-    private func run_CNN_PFF_2D_backbone() {
-        guard mlIsReady, let model = cnn_pff_2D_backbone else {
-            DispatchQueue.main.async { self.mlStatusMessage = "ML model not ready" }
+    /// Acumula um snapshot multi-canal (acc xyz + gyro xyz + GPS 5x).
+    /// Quando o buffer fecha (= 300 amostras = 15 s @ 20 Hz), dispara
+    /// `runTFCInferenceOnCurrentWindow` e zera buffer (próxima janela limpa).
+    private func appendWindowSample(
+        timestampMs: Int64,
+        ax: Float, ay: Float, az: Float,
+        gx: Float, gy: Float, gz: Float,
+        lat: Float, lon: Float, alt: Float, hAcc: Float, vAcc: Float
+    ) {
+        // Snapshot na ordem canônica de SensorSchema.featureColumns:
+        // [acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z,
+        //  latitude, longitude, altitude, horizontal_accuracy, vertical_accuracy]
+        windowBuffer.append(ax)
+        windowBuffer.append(ay)
+        windowBuffer.append(az)
+        windowBuffer.append(gx)
+        windowBuffer.append(gy)
+        windowBuffer.append(gz)
+        windowBuffer.append(lat)
+        windowBuffer.append(lon)
+        windowBuffer.append(alt)
+        windowBuffer.append(hAcc)
+        windowBuffer.append(vAcc)
+        windowSampleTimestamps.append(timestampMs)
+
+        let nSamples = windowSampleTimestamps.count
+        if nSamples >= appConstants.windowSize {
+            // Captura a janela atual e zera. Step = window = sem overlap.
+            // Por que copiar antes de zerar: a inferência pode ser despachada
+            // pra outra fila no futuro; deixar imutável evita race conditions.
+            let bufferCopy = windowBuffer
+            let firstTs = windowSampleTimestamps[0]
+            windowBuffer.removeAll(keepingCapacity: true)
+            windowSampleTimestamps.removeAll(keepingCapacity: true)
+
+            runTFCInferenceOnWindow(buffer: bufferCopy, windowStartMs: firstTs)
+        }
+    }
+
+    /// Roda o TFC_Backbone sobre uma janela fechada (formato (T, C) flat) e
+    /// armazena o embedding 256-d resultante + timestamp inicial da janela.
+    ///
+    /// IMPORTANTE: o buffer chega no layout (T, C) row-major (snapshots por
+    /// tick). O `WindowedSensorDataset` internamente transpõe pra (W, C, T),
+    /// que é o que o `TFC_Backbone` espera (shape `[1, 11, 300]`).
+    private func runTFCInferenceOnWindow(buffer: [Float], windowStartMs: Int64) {
+        guard mlIsReady, let extractor = tfcExtractor else {
+            DispatchQueue.main.async { self.mlStatusMessage = "TFC model not ready" }
             return
         }
-        guard let input = prepareMLMultiArray() else {
-            DispatchQueue.main.async { self.mlStatusMessage = "Failed to prepare ML input" }
-            return
-        }
+        let T = appConstants.windowSize
+
+        // Constrói um WindowedSensorDataset de UMA janela só para reaproveitar
+        // a API do extractor. Para uma janela, W = 1.
+        let synthSensors = SensorTensor(
+            timestamps: Array(repeating: windowStartMs, count: T),
+            features: buffer,
+            featureNames: SensorSchema.featureColumns
+        )
+        let dataset = WindowedSensorDataset(sensors: synthSensors,
+                                            windowSize: T, stepSize: T)
+
         do {
-            let output = try model.prediction(x_1: input)
-            let features = output.var_200ShapedArray
-            let newData = utils.shapedArrayTo2D(features)
+            let emb = try extractor.embed(windowed: dataset)
 
-            // Atualiza o "último resultado" (compat) ...
-            data2DLock.lock()
-            data2D = newData
-            data2DLock.unlock()
-
-            // ... e acumula com cap rolling para clustering posterior.
-            // Por quê acumulador separado: data2D é o snapshot atual; o
-            // accumulator é a história. Antes isso vivia em FeatureMatrix
-            // no Core Data — agora vive em memória, conforme escopo.
-            data2DAccumulatorLock.lock()
-            data2DAccumulator.append(contentsOf: newData)
-            if data2DAccumulator.count > data2DAccumulatorCap {
-                let overflow = data2DAccumulator.count - data2DAccumulatorCap
-                data2DAccumulator.removeFirst(overflow)
+            embeddingsLock.lock()
+            embeddingsAccumulator.append(contentsOf: emb)
+            windowTimestamps.append(windowStartMs)
+            if windowTimestamps.count > embeddingsCapWindows {
+                let overflow = windowTimestamps.count - embeddingsCapWindows
+                windowTimestamps.removeFirst(overflow)
+                embeddingsAccumulator.removeFirst(overflow * appConstants.embeddingDim)
             }
-            data2DAccumulatorLock.unlock()
+            let totalEmbedded = windowTimestamps.count
+            embeddingsLock.unlock()
 
-            mlStatusMessage = "Prediction OK"
+            DispatchQueue.main.async {
+                self.mlStatusMessage = "Window \(totalEmbedded) embedded"
+            }
         } catch {
             DispatchQueue.main.async {
-                self.mlStatusMessage = "CNN_PFF_2D_backbone Prediction Error: \(error.localizedDescription)"
+                self.mlStatusMessage = "TFC inference error: \(error.localizedDescription)"
             }
-            print("CNN_PFF_2D_backbone Prediction Error:", error)
         }
     }
 
-    private func prepareMLMultiArray() -> MLMultiArray? {
-        let windowSize = appConstants.windowSize
-        guard mlBufferTimed.count >= windowSize else { return nil }
-        let dt = appConstants.sensorUpdateInterval
-        guard dt > 0 else { return nil }
-        let rateHz = appConstants.sensorFrequencyHz
-
-        guard let startT = mlBufferTimed.first?.t else { return nil }
-        let resampled = utils.resampleToFixedRate(
-            samples: mlBufferTimed,
-            startTime: startT,
-            count: windowSize,
-            rateHz: rateHz
-        )
-
-        let shape: [NSNumber] = [1, 6, NSNumber(value: windowSize)]
-        guard let array = try? MLMultiArray(shape: shape, dataType: .float32) else { return nil }
-
-        for (tIndex, s) in resampled.enumerated() {
-            array[[0, 0, tIndex] as [NSNumber]] = NSNumber(value: Float32(s.ax))
-            array[[0, 1, tIndex] as [NSNumber]] = NSNumber(value: Float32(s.ay))
-            array[[0, 2, tIndex] as [NSNumber]] = NSNumber(value: Float32(s.az))
-            array[[0, 3, tIndex] as [NSNumber]] = NSNumber(value: Float32(s.gx))
-            array[[0, 4, tIndex] as [NSNumber]] = NSNumber(value: Float32(s.gy))
-            array[[0, 5, tIndex] as [NSNumber]] = NSNumber(value: Float32(s.gz))
-        }
-        return array
-    }
-
-    func appendToMLBuffer(timestamp: TimeInterval, ax: Float, ay: Float, az: Float,
-                          gx: Float, gy: Float, gz: Float) {
-        mlBufferTimed.append(Sample(t: timestamp, ax: ax, ay: ay, az: az, gx: gx, gy: gy, gz: gz))
-
-        if mlBufferTimed.count > appConstants.windowSize { mlBufferTimed.removeFirst() }
-
-        if mlBufferTimed.count == appConstants.windowSize {
-            run_CNN_PFF_2D_backbone()
+    /// Zera os embeddings acumulados (chamar antes de uma nova coleta se
+    /// não quiser misturar histórico).
+    func resetEmbeddings() {
+        embeddingsLock.lock()
+        embeddingsAccumulator.removeAll(keepingCapacity: false)
+        windowTimestamps.removeAll(keepingCapacity: false)
+        embeddingsLock.unlock()
+        DispatchQueue.main.async {
+            self.episodes = []
+            self.clusterLabels = []
+            self.linkageMatrix = []
         }
     }
 
-    // MARK: - Clustering (agora alimentado pelo acumulador em memória)
+    // MARK: - Clustering (alimentado pelo embeddingsAccumulator do TFC)
+    //
+    // PARIDADE COM PYTHON (`compute_episodes` + Run_Daily_Clustering):
+    // - Input: embeddings 256-d por janela (não amostras crus, não feature maps).
+    // - Linkage: adjacente Ward via `Utils.linkageAdjacentWard(stopAtK: t)`.
+    // - fcluster: `Utils.fclusterFromPartialZ` — labels 1..t por janela.
+    // - Episode boundaries em ms: `EpisodeBuilder.episodesToMs` usa
+    //   `windowStartTimestamps` (NÃO os timestamps de amostra), igual ao
+    //   `dataset.window_timestamp(end_idx, 0)` do Python.
 
     func runDailyClustering(t: Int = 8) {
-        // Por quê mudou: antes lia FeatureMatrix do Core Data e fazia
-        // downsample incremental para ~1000 amostras. Agora lê do
-        // data2DAccumulator (capped a 10k), aplica o mesmo downsample
-        // adaptativo e roda o clustering Ward. Limitação: o cap rolling
-        // de 10k é um trade-off de memória x cobertura histórica.
+        // Despacha o cluster pesado para um background queue — Ward é O(N²)
+        // mesmo com heap, e a UI não pode travar enquanto isso roda.
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
 
-        let targetSamples = 1000
+            // Cópia local sob lock para não bloquear a coleta.
+            self.embeddingsLock.lock()
+            let embSnapshot = self.embeddingsAccumulator
+            let tsSnapshot = self.windowTimestamps
+            self.embeddingsLock.unlock()
 
-        // Cópia local sob lock para não bloquear a coleta.
-        data2DAccumulatorLock.lock()
-        let snapshot = data2DAccumulator
-        data2DAccumulatorLock.unlock()
+            let W = tsSnapshot.count
+            let D = self.appConstants.embeddingDim
 
-        guard snapshot.count >= 2 else {
-            DispatchQueue.main.async {
-                self.linkageMatrix = []
-                self.clusterLabels = []
+            guard W >= 2 else {
+                DispatchQueue.main.async {
+                    self.linkageMatrix = []
+                    self.clusterLabels = []
+                    self.episodes = []
+                }
+                print("[CLUSTERING] Janelas insuficientes (\(W))")
+                return
             }
-            print("[CLUSTERING] Sem amostras suficientes (\(snapshot.count))")
-            return
+
+            print("[CLUSTERING] Ward em \(W) janelas, D=\(D)")
+
+            let (episodes, labels) = EpisodeBuilder.computeEpisodes(
+                embeddings: embSnapshot,
+                W: W,
+                D: D,
+                windowStartTimestamps: tsSnapshot,
+                numberOfEpisodes: t,
+                utils: self.utils
+            )
+
+            // Para compat com a UI (linkageMatrix exposto), expor só o número
+            // de linhas — re-gerar Z aqui seria desperdício porque já foi
+            // computado dentro de computeEpisodes.
+            let linkageRowCount = W - t
+
+            DispatchQueue.main.async {
+                self.linkageMatrix = [[Float]](repeating: [], count: max(0, linkageRowCount))
+                self.clusterLabels = labels
+                self.episodes = episodes
+            }
+
+            print("[CLUSTERING] Pronto. Clusters alvo: \(t), Labels: \(labels.count), Episódios: \(episodes.count)")
+
+            // Recomputa groupSeries da última sessão para alimentar o
+            // CombinedSensorsChartView. Roda na mesma fila background.
+//            if let sid = self.lastSessionId {
+//                self.populateGroupSeries(forSession: sid)
+//            }
         }
+    }
 
-        let window = max(1, snapshot.count / targetSamples)
-        let reduced = utils.downsampleMean(snapshot, window: window)
+    // MARK: - Group series para o CombinedSensorsChartView
+    //
+    // PARIDADE COM PYTHON (`show_sensors_plotly`):
+    // - Cada grupo é uma média dos canais (acc_x+acc_y+acc_z)/3, etc.
+    // - O eixo X é tempo absoluto convertido para Date (timezone-aware no display).
+    // - Tudo na resolução amostral da SessionReading (20 Hz @ coleta), mas
+    //   downsampled para um cap (`targetPlotPoints`) para manter a UI responsiva.
 
-        print("[CLUSTERING] Ward em \(reduced.count) amostras (window=\(window))")
+    private let targetPlotPoints = 2000
 
-        let Z = self.utils.linkageAdjacentWard(reduced, stopAtK: t)
-        let labels = self.utils.fclusterFromPartialZ(Z: Z, n: reduced.count)
+    /// Lê SensorReading da sessão indicada, computa as séries por grupo (acc,
+    /// gyro) e publica em `groupSeries`. Roda em background context.
+//    func populateGroupSeries(forSession sessionId: UUID) {
+//        let ctx = PersistenceController.shared.container.newBackgroundContext()
+//        ctx.perform {
+//            let req: NSFetchRequest<SensorReading> = SensorReading.fetchRequest()
+//            req.predicate = NSPredicate(format: "sessionId == %@", sessionId as CVarArg)
+//            req.sortDescriptors = [NSSortDescriptor(key: "timestamp", ascending: true)]
+//            req.returnsObjectsAsFaults = false
+//            req.fetchBatchSize = 1000
+//
+////            guard let readings = try? ctx.fetch(req), !readings.isEmpty else {
+////                DispatchQueue.main.async { self.groupSeries = [] }
+////                return
+////            }
+//
+//            let N = readings.count
+//            let target = self.targetPlotPoints
+//            // Downsample por janela fixa de média. Para coletas curtas (N <= target),
+//            // window = 1 → vira identidade.
+//            let window = max(1, N / target)
+//
+//            var accSamples: [SensorGroupSample] = []
+//            var gyroSamples: [SensorGroupSample] = []
+//            accSamples.reserveCapacity(N / window + 1)
+//            gyroSamples.reserveCapacity(N / window + 1)
+//
+//            var i = 0
+//            while i < N {
+//                let end = min(N, i + window)
+//                var accSum: Double = 0
+//                var gyroSum: Double = 0
+//                var tsSum: Double = 0
+//                let k = end - i
+//                for j in i..<end {
+//                    let r = readings[j]
+//                    accSum += Double(r.ax + r.ay + r.az) / 3.0
+//                    gyroSum += Double(r.gx + r.gy + r.gz) / 3.0
+//                    tsSum += Double(r.timestamp)
+//                    // Libera fault — não precisamos manter o objeto carregado.
+//                    ctx.refresh(r, mergeChanges: false)
+//                }
+//                let kd = Double(k)
+//                let tsAvg = tsSum / kd
+//                let date = Date(timeIntervalSince1970: tsAvg / 1000.0)
+//                accSamples.append(SensorGroupSample(timestamp: date,
+//                                                    value: accSum / kd,
+//                                                    group: "Accelerometer"))
+//                gyroSamples.append(SensorGroupSample(timestamp: date,
+//                                                     value: gyroSum / kd,
+//                                                     group: "Gyroscope"))
+//                i = end
+//            }
+//
+//            let series: [SensorGroupSeries] = [
+//                SensorGroupSeries(name: "Accelerometer", samples: accSamples),
+//                SensorGroupSeries(name: "Gyroscope",     samples: gyroSamples),
+//            ]
+//
+//            DispatchQueue.main.async {
+//                self.groupSeries = series
+//            }
+//            print("[GROUPSERIES] Pronto: \(accSamples.count) pontos por grupo (window=\(window), N=\(N))")
+//        }
+//    }
 
-        DispatchQueue.main.async {
-            self.linkageMatrix = Z
-            self.clusterLabels = labels
+    // MARK: - GPS points by episode (alimenta EpisodesMapView)
+    //
+    // PARIDADE COM PYTHON (`generate_map`):
+    // - Para cada episódio, recortar pontos GPS cujo timestamp está em
+    //   [ep.startMs, ep.endMs].
+    // - Colorir pelo label do episódio (mesma paleta = mesmo índice).
+    //
+    // Implementação: lê LocationEntity da sessão via fetchContext background
+    // (evita travar a UI). Retorna pontos prontos para serem passados ao
+    // EpisodesMapView.
+
+    func gatherEpisodePoints(forSession sessionId: UUID) async -> [EpisodePoint] {
+        let episodesSnapshot: [Episode] = await MainActor.run { self.episodes }
+        guard !episodesSnapshot.isEmpty else { return [] }
+
+        return await withCheckedContinuation { continuation in
+            let ctx = PersistenceController.shared.container.newBackgroundContext()
+            ctx.perform {
+                let req: NSFetchRequest<LocationEntity> = LocationEntity.fetchRequest()
+                req.predicate = NSPredicate(format: "sessionId == %@", sessionId as CVarArg)
+                req.sortDescriptors = [NSSortDescriptor(key: "timestamp", ascending: true)]
+                req.returnsObjectsAsFaults = false
+                guard let locs = try? ctx.fetch(req) else {
+                    continuation.resume(returning: [])
+                    return
+                }
+
+                // Atribui label de episódio por bisecção sobre o array ORDENADO de
+                // (startMs, endMs, label). Como os episódios são monotônicos no tempo,
+                // basta um ponteiro avançando — O(W + Loc).
+                var sortedEps = episodesSnapshot
+                sortedEps.sort { $0.startMs < $1.startMs }
+
+                var pts: [EpisodePoint] = []
+                pts.reserveCapacity(locs.count)
+                var epIdx = 0
+
+                for loc in locs {
+                    let ts = loc.timestamp
+                    // Avança até encontrar um episódio cujo end >= ts.
+                    while epIdx < sortedEps.count && sortedEps[epIdx].endMs < ts {
+                        epIdx += 1
+                    }
+                    guard epIdx < sortedEps.count else { break }
+                    let ep = sortedEps[epIdx]
+                    guard ts >= ep.startMs else {
+                        // Buraco entre episódios — pular este ponto.
+                        continue
+                    }
+                    pts.append(EpisodePoint(
+                        coordinate: CLLocationCoordinate2D(
+                            latitude: CLLocationDegrees(loc.latitude),
+                            longitude: CLLocationDegrees(loc.longitude)
+                        ),
+                        label: ep.label,
+                        timestampMs: ts
+                    ))
+                }
+                continuation.resume(returning: pts)
+            }
         }
-
-        print("[CLUSTERING] Pronto. Clusters: \(t), Labels: \(labels.count)")
     }
 
     // MARK: - Export CSV (Etapa C — streaming + merge two-pointer)
