@@ -14,8 +14,9 @@ struct ContentView: View {
     private let appConstants = AppConstants()
     private let utils = Utils()
     
+    // Default K = 10. O Stepper em SegmentationCardView clampa automaticamente
+    // ao range válido [2, min(W, 30)] sempre que `windowCount` mudar.
     @State private var targetEpisodes = 10
-    @State private var availableTargets = [5, 6, 7, 8, 9, 10]
     
     var body: some View {
         NavigationStack {
@@ -38,7 +39,8 @@ struct ContentView: View {
                     //                    ActivityCard(activity: sensorManager.predictedActivity)
                     
                     // Clustering
-                    SegmentationCardView(sensorManager: sensorManager, targetEpisodes: $targetEpisodes, availableTargets: $availableTargets)
+                    SegmentationCardView(sensorManager: sensorManager,
+                                         targetEpisodes: $targetEpisodes)
                     
                     // Actions
                     VStack(spacing: 8) {

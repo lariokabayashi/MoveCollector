@@ -91,10 +91,16 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
     @Published var mlStatusMessage: String = ""
     @Published var mlIsReady: Bool = false
 
-    /// Acumulador de embeddings (256-d, flat row-major) — UM por janela fechada.
-    /// Substitui completamente o antigo `data2DAccumulator` (feature maps por tick).
-    /// Cap: 4000 janelas × 256d × 4 bytes ≈ 4 MB → cobre 4000 × 15s ≈ 16 h de coleta.
-    private var embeddingsAccumulator: [Float] = []
+    /// Acumulador de **janelas cruas** — cada entrada tem `windowSize * nChannels`
+    /// floats no layout (T, C) row-major, exatamente como `windowBuffer` quando
+    /// fecha. A inferência TFC é deferida pra `runDailyClustering` porque
+    /// precisa de μ/σ globais da sessão (paridade com `normalize_features` do
+    /// Python aplicado ANTES do windowing).
+    ///
+    /// Cap: 4000 janelas × 3300 floats × 4 bytes ≈ 50 MB → cobre 4000 × 15s ≈ 16 h.
+    /// (Antes era cap em embeddings de 256d = ~4 MB; agora guardamos os 11 canais
+    /// crus que valem ~13× mais. Memória continua aceitável para iPhone.)
+    private var rawWindowsAccumulator: [[Float]] = []
     private var windowTimestamps: [Int64] = []
     private let embeddingsLock = NSLock()
     private let embeddingsCapWindows = 4000
@@ -114,16 +120,10 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
     @Published var episodes: [Episode] = []
     @Published var buffer: [[[Float]]] = []   // mantido para compatibilidade da UI
 
-    /// Séries por grupo para o `CombinedSensorsChartView` — uma entrada por
-    /// grupo (Accelerometer, Gyroscope), cada uma com a lista de samples
-    /// (Date, valor médio dos canais do grupo) já downsampled para plot.
-    /// Populado por `populateGroupSeries(forSession:)` após `runDailyClustering`.
-    ///
-    /// PORQUÊ struct e não `[(name:, samples:)]`: tuples com labels nomeados em
-    /// @Published triggerizam stack overflow no MetadataCacheKey do runtime
-    /// (EXC_BAD_ACCESS code=2 em libswiftCore.dylib). Struct nomeado evita.
-//    @Published var groupSeries: [SensorGroupSeries] = []
-
+    /// Número de janelas CRUAS acumuladas (cada uma = 300 amostras = 15s).
+    /// A UI usa isto para mostrar "X janelas coletadas (≈Y min)" e calcular
+    /// o range válido de K para o Stepper de "episódios alvo".
+    @Published var windowCount: Int = 0
     @Published var isRecording = false
     @Published var accelX: Float = 0
     @Published var accelY: Float = 0
@@ -199,8 +199,27 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
     }
 
     private func startBackgroundTimer() {
-        collectionTimer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .background))
-        collectionTimer?.schedule(deadline: .now(), repeating: appConstants.sensorUpdateInterval)
+        // Por que `.utility` e não `.background`:
+        // .background é o menor nível de prioridade do iOS — o scheduler
+        // pode coalescer / atrasar / throttle o timer livremente sob qualquer
+        // carga concorrente. Resultado prático observado: a 20 Hz nominal,
+        // o timer entrega ~10 Hz reais, e cada "janela de 300 amostras"
+        // acaba cobrindo ~30s de tempo real em vez de 15s.
+        // .utility é "operação longa, importante, mas não interativa" —
+        // exatamente o caso de sampling contínuo de sensores. O timer
+        // não vai ser preempt-ado por trabalho de UI nem coalescido com
+        // outras tasks de background.
+        //
+        // `leeway: 5 ms` dá ao scheduler folga pra alinhar com outros
+        // timers e poupar bateria sem comprometer a frequência alvo.
+        collectionTimer = DispatchSource.makeTimerSource(
+            queue: DispatchQueue.global(qos: .utility)
+        )
+        collectionTimer?.schedule(
+            deadline: .now(),
+            repeating: appConstants.sensorUpdateInterval,
+            leeway: .milliseconds(5)
+        )
         collectionTimer?.setEventHandler { [weak self] in
             self?.collectData()
         }
@@ -437,32 +456,199 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
         let nSamples = windowSampleTimestamps.count
         if nSamples >= appConstants.windowSize {
             // Captura a janela atual e zera. Step = window = sem overlap.
-            // Por que copiar antes de zerar: a inferência pode ser despachada
-            // pra outra fila no futuro; deixar imutável evita race conditions.
             let bufferCopy = windowBuffer
             let firstTs = windowSampleTimestamps[0]
             windowBuffer.removeAll(keepingCapacity: true)
             windowSampleTimestamps.removeAll(keepingCapacity: true)
 
-            runTFCInferenceOnWindow(buffer: bufferCopy, windowStartMs: firstTs)
+            // NÃO roda TFC aqui. Acumula a janela CRUA — a normalização global
+            // (μ/σ por canal sobre toda a sessão) só pode ser calculada quando
+            // todas as janelas estiverem em mãos. Isso bate exatamente com o
+            // Python: `normalize_features(sensors.features, "standard")` é
+            // aplicado ANTES do windowing.
+            embeddingsLock.lock()
+            rawWindowsAccumulator.append(bufferCopy)
+            windowTimestamps.append(firstTs)
+            // Cap rolling — descarta janelas mais antigas se exceder.
+            if windowTimestamps.count > embeddingsCapWindows {
+                let overflow = windowTimestamps.count - embeddingsCapWindows
+                windowTimestamps.removeFirst(overflow)
+                rawWindowsAccumulator.removeFirst(overflow)
+            }
+            let total = windowTimestamps.count
+            embeddingsLock.unlock()
+
+            DispatchQueue.main.async {
+                self.windowCount = total
+                self.mlStatusMessage = "Janela \(total) acumulada (crua, sem TFC)"
+            }
         }
     }
 
-    /// Roda o TFC_Backbone sobre uma janela fechada (formato (T, C) flat) e
-    /// armazena o embedding 256-d resultante + timestamp inicial da janela.
+    /// Detecta janelas em que TODA a janela tem `hAcc <= 0` (= sem fix de GPS)
+    /// e backfilla os 5 canais GPS dessas janelas com a média das primeiras
+    /// janelas COM fix. Modifica `windows` in-place.
     ///
-    /// IMPORTANTE: o buffer chega no layout (T, C) row-major (snapshots por
-    /// tick). O `WindowedSensorDataset` internamente transpõe pra (W, C, T),
-    /// que é o que o `TFC_Backbone` espera (shape `[1, 11, 300]`).
-    private func runTFCInferenceOnWindow(buffer: [Float], windowStartMs: Int64) {
-        guard mlIsReady, let extractor = tfcExtractor else {
-            DispatchQueue.main.async { self.mlStatusMessage = "TFC model not ready" }
+    /// PROBLEMA QUE RESOLVE:
+    /// Sem isso, janelas pré-fix carregam `(lat, lon, alt, hAcc, vAcc) = (0,0,0,0,0)`.
+    /// A normalização global por canal vê distribuição bimodal degenerada e
+    /// produz embeddings constantes pro bloco pré-fix → o linkage agrupa
+    /// tudo num cluster gigante (sintoma: "primeiro episódio de 1h22min").
+    ///
+    /// LIMITAÇÃO: ainda assim, os canais GPS das janelas backfilladas ficam
+    /// constantes (já que usamos a MESMA leitura média de GPS). Isso significa
+    /// que dentro desse bloco o sub-sinal GPS não discrimina, mas pelo menos a
+    /// distribuição não é mais degenerada e o modelo vê valores plausíveis em
+    /// vez de zeros mágicos. Para resolver o problema arquitetural (modelo
+    /// monolítico de 11 canais vs. partitioned como o Python), precisaríamos
+    /// converter 3 .mlpackages separados (acc, gyro, GPS).
+    private func backfillPreFixGPSWindows(_ windows: inout [[Float]], W: Int) {
+        let T = appConstants.windowSize
+        let C = appConstants.nChannels
+        let hAccCol = 9   // horizontal_accuracy (offset dentro de cada amostra)
+
+        // 1) Descobrir quantas janelas têm GPS ausente em TODOS os ticks.
+        //    "Ausente" = hAcc <= 0 (zero é nosso sentinela de "sem snapshot";
+        //    fixes reais sempre têm hAcc > 0 em metros).
+        var preFixCount = 0
+        var firstWindowWithFix: Int? = nil
+        for wIdx in 0..<W {
+            var anyFix = false
+            let w = windows[wIdx]
+            for t in 0..<T where w[t * C + hAccCol] > 0 {
+                anyFix = true
+                break
+            }
+            if anyFix {
+                if firstWindowWithFix == nil { firstWindowWithFix = wIdx }
+            } else {
+                if firstWindowWithFix == nil { preFixCount += 1 }
+            }
+        }
+
+        // 2) Logging de diagnóstico — sempre útil pra confirmar a hipótese.
+        print("[GPS DIAG] W=\(W), janelas pré-fix (sem GPS) = \(preFixCount), "
+              + "primeira janela com fix = \(firstWindowWithFix.map(String.init) ?? "nenhuma")")
+
+        guard preFixCount > 0, let firstIdx = firstWindowWithFix else {
+            // Caso A: zero janelas pré-fix → tudo já tem GPS, nada a fazer.
+            // Caso B: NENHUMA janela tem fix → GPS nunca chegou. Backfilling não
+            // resolve; melhor deixar zerado e logar warning.
+            if firstWindowWithFix == nil {
+                print("[GPS DIAG] ⚠️ NENHUMA janela tem GPS válido — "
+                      + "modelo vai operar só com acc/gyro normalizados.")
+            }
             return
         }
+
+        // 3) Calcular GPS médio das primeiras 10 janelas com fix
+        //    (10 = ~2.5 min de amostras com GPS já estabilizado).
+        let nWindowsForMean = min(10, W - firstIdx)
+        var sumLat = 0.0, sumLon = 0.0, sumAlt = 0.0
+        var sumHAcc = 0.0, sumVAcc = 0.0
+        var nSamples = 0
+        for wIdx in firstIdx..<(firstIdx + nWindowsForMean) {
+            let w = windows[wIdx]
+            for t in 0..<T where w[t * C + hAccCol] > 0 {
+                sumLat += Double(w[t * C + 6])
+                sumLon += Double(w[t * C + 7])
+                sumAlt += Double(w[t * C + 8])
+                sumHAcc += Double(w[t * C + 9])
+                sumVAcc += Double(w[t * C + 10])
+                nSamples += 1
+            }
+        }
+        guard nSamples > 0 else { return }
+        let invN = 1.0 / Double(nSamples)
+        let fillLat = Float(sumLat * invN)
+        let fillLon = Float(sumLon * invN)
+        let fillAlt = Float(sumAlt * invN)
+        let fillHAcc = Float(sumHAcc * invN)
+        let fillVAcc = Float(sumVAcc * invN)
+        print("[GPS BACKFILL] Preenchendo \(preFixCount) janelas pré-fix com "
+              + "lat=\(fillLat) lon=\(fillLon) alt=\(fillAlt) "
+              + "(média de \(nSamples) amostras com fix)")
+
+        // 4) Aplicar o backfill nas janelas pré-fix (todas antes de `firstIdx`).
+        for wIdx in 0..<firstIdx {
+            for t in 0..<T {
+                windows[wIdx][t * C + 6] = fillLat
+                windows[wIdx][t * C + 7] = fillLon
+                windows[wIdx][t * C + 8] = fillAlt
+                windows[wIdx][t * C + 9] = fillHAcc
+                windows[wIdx][t * C + 10] = fillVAcc
+            }
+        }
+    }
+
+    /// Aplica `normalize_features("standard")` Python: para cada canal `c`,
+    /// computa μ_c, σ_c sobre TODAS as amostras de TODAS as janelas, e
+    /// transforma cada valor em `(x - μ_c) / σ_c`. Devolve janelas normalizadas
+    /// no MESMO layout (T, C) row-major.
+    ///
+    /// Por quê: o TFC_Backbone foi treinado em features standardizadas globalmente
+    /// (μ=0, σ=1 por canal sobre a sessão inteira). Sem isso, os canais GPS
+    /// (latitude ~-23, altitude ~700) dominam o input em magnitude e empurram as
+    /// BatchNorms internas para fora da distribuição que viram no treino — o
+    /// embedding fica essencialmente uma projeção do GPS, ignorando acc/gyro.
+    private func normalizeWindowsSessionWide(_ windows: [[Float]]) -> [[Float]] {
+        let T = appConstants.windowSize
+        let C = appConstants.nChannels
+        guard !windows.isEmpty else { return [] }
+
+        // Pass 1: somas por canal e somas-de-quadrados → μ e σ populacional
+        // (ddof=0, igual ao numpy.std default usado por `normalize_features`).
+        var sum = [Double](repeating: 0, count: C)
+        var sumSq = [Double](repeating: 0, count: C)
+        var N: Int = 0
+        for w in windows {
+            for t in 0..<T {
+                for c in 0..<C {
+                    let v = Double(w[t * C + c])
+                    sum[c] += v
+                    sumSq[c] += v * v
+                }
+            }
+            N += T
+        }
+        let invN = 1.0 / Double(N)
+        var mu = [Float](repeating: 0, count: C)
+        var sd = [Float](repeating: 1, count: C)
+        for c in 0..<C {
+            let m = sum[c] * invN
+            var v = sumSq[c] * invN - m * m
+            if v < 0 { v = 0 }
+            let s = sqrt(v)
+            mu[c] = Float(m)
+            sd[c] = s == 0 ? 1 : Float(s)
+        }
+        print("[NORMALIZE] N=\(N) samples, C=\(C) canais")
+        for c in 0..<C {
+            print("  ch \(SensorSchema.featureColumns[c]): μ=\(mu[c]) σ=\(sd[c])")
+        }
+
+        // Pass 2: aplica (x - μ) / σ por canal.
+        var out = [[Float]]()
+        out.reserveCapacity(windows.count)
+        for w in windows {
+            var nw = w   // copy
+            for t in 0..<T {
+                for c in 0..<C {
+                    let idx = t * C + c
+                    nw[idx] = (nw[idx] - mu[c]) / sd[c]
+                }
+            }
+            out.append(nw)
+        }
+        return out
+    }
+
+    /// Roda inferência TFC numa única janela JÁ NORMALIZADA (layout T,C row-major).
+    /// Devolve embedding 256-d flat.
+    private func embedSingleNormalizedWindow(_ buffer: [Float], windowStartMs: Int64) -> [Float]? {
+        guard let extractor = tfcExtractor else { return nil }
         let T = appConstants.windowSize
 
-        // Constrói um WindowedSensorDataset de UMA janela só para reaproveitar
-        // a API do extractor. Para uma janela, W = 1.
         let synthSensors = SensorTensor(
             timestamps: Array(repeating: windowStartMs, count: T),
             features: buffer,
@@ -470,84 +656,138 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
         )
         let dataset = WindowedSensorDataset(sensors: synthSensors,
                                             windowSize: T, stepSize: T)
-
         do {
-            let emb = try extractor.embed(windowed: dataset)
-
-            embeddingsLock.lock()
-            embeddingsAccumulator.append(contentsOf: emb)
-            windowTimestamps.append(windowStartMs)
-            if windowTimestamps.count > embeddingsCapWindows {
-                let overflow = windowTimestamps.count - embeddingsCapWindows
-                windowTimestamps.removeFirst(overflow)
-                embeddingsAccumulator.removeFirst(overflow * appConstants.embeddingDim)
-            }
-            let totalEmbedded = windowTimestamps.count
-            embeddingsLock.unlock()
-
-            DispatchQueue.main.async {
-                self.mlStatusMessage = "Window \(totalEmbedded) embedded"
-            }
+            return try extractor.embed(windowed: dataset)
         } catch {
-            DispatchQueue.main.async {
-                self.mlStatusMessage = "TFC inference error: \(error.localizedDescription)"
-            }
+            print("[TFC] embed error: \(error)")
+            return nil
         }
     }
 
-    /// Zera os embeddings acumulados (chamar antes de uma nova coleta se
+    /// Zera as janelas cruas acumuladas (chamar antes de uma nova coleta se
     /// não quiser misturar histórico).
     func resetEmbeddings() {
         embeddingsLock.lock()
-        embeddingsAccumulator.removeAll(keepingCapacity: false)
+        rawWindowsAccumulator.removeAll(keepingCapacity: false)
         windowTimestamps.removeAll(keepingCapacity: false)
         embeddingsLock.unlock()
         DispatchQueue.main.async {
             self.episodes = []
             self.clusterLabels = []
             self.linkageMatrix = []
+            self.windowCount = 0
         }
     }
 
-    // MARK: - Clustering (alimentado pelo embeddingsAccumulator do TFC)
+    // MARK: - Clustering (a partir das janelas cruas + normalização global)
     //
-    // PARIDADE COM PYTHON (`compute_episodes` + Run_Daily_Clustering):
-    // - Input: embeddings 256-d por janela (não amostras crus, não feature maps).
-    // - Linkage: adjacente Ward via `Utils.linkageAdjacentWard(stopAtK: t)`.
-    // - fcluster: `Utils.fclusterFromPartialZ` — labels 1..t por janela.
-    // - Episode boundaries em ms: `EpisodeBuilder.episodesToMs` usa
-    //   `windowStartTimestamps` (NÃO os timestamps de amostra), igual ao
-    //   `dataset.window_timestamp(end_idx, 0)` do Python.
+    // PARIDADE COM PYTHON (`FeatureExtractor.__init__` + `__call__` + `Run_Daily_Clustering`):
+    //  1. `normalize_features(sensors.features, "standard")` — μ/σ por canal
+    //     sobre a sessão inteira (todas as amostras de todas as janelas).
+    //  2. Para cada janela normalizada, roda o `TFC_Backbone` e concatena
+    //     `[z_t, z_f]` → embedding 256-d.
+    //  3. `linkage_adjacent_ward(stopAtK)` + `fcluster_custom` sobre os embeddings.
+    //  4. `get_start_end_label` + `episode_to_ms` produzem `[Episode]`.
 
     func runDailyClustering(t: Int = 8) {
-        // Despacha o cluster pesado para um background queue — Ward é O(N²)
-        // mesmo com heap, e a UI não pode travar enquanto isso roda.
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
 
-            // Cópia local sob lock para não bloquear a coleta.
+            // 1) Snapshot atômico das janelas cruas + timestamps.
             self.embeddingsLock.lock()
-            let embSnapshot = self.embeddingsAccumulator
+            let rawWindows = self.rawWindowsAccumulator
             let tsSnapshot = self.windowTimestamps
             self.embeddingsLock.unlock()
 
             let W = tsSnapshot.count
-            let D = self.appConstants.embeddingDim
 
             guard W >= 2 else {
                 DispatchQueue.main.async {
                     self.linkageMatrix = []
                     self.clusterLabels = []
                     self.episodes = []
+                    self.mlStatusMessage = "Janelas insuficientes (\(W)) — colete por mais tempo"
                 }
                 print("[CLUSTERING] Janelas insuficientes (\(W))")
                 return
             }
 
-            print("[CLUSTERING] Ward em \(W) janelas, D=\(D)")
+            // 1.5) DIAGNÓSTICO + BACKFILL de janelas pré-fix de GPS.
+            //
+            // Por que: quando a coleta começa dentro de um prédio/academia,
+            // o GPS pode demorar muito (ou nunca) pegar fix. Nesses ticks
+            // o `lastGPSSnapshot` é nil → usamos zeros, e a 1ª etapa de
+            // normalização vê uma distribuição bimodal degenerada (muitos
+            // zeros + alguns valores reais), produzindo embeddings constantes
+            // pro bloco pré-fix → linkage agrupa tudo num cluster gigante.
+            //
+            // Mitigação: detectar janelas em que TODA a janela tem hAcc <= 0
+            // (= sem fix), e preenche TODOS os 5 canais GPS dessas janelas
+            // com a média dos valores das primeiras janelas COM fix. Não é
+            // paridade exata com Python (que carrega CSV onde GPS pode estar
+            // vazio e provavelmente filtra), mas evita o sintoma do "mega-bloco".
+            var windowsToProcess = rawWindows   // cópia mutável
+            self.backfillPreFixGPSWindows(&windowsToProcess, W: W)
 
+            // Sanity check da frequência REAL de sampling. Cada janela
+            // deveria ter `windowSize/sensorFrequencyHz = 15s` em tempo
+            // real. Se o tempo entre tsSnapshot[0] e tsSnapshot[W-1] dividido
+            // por (W-1) der muito diferente de 15s, o timer não está
+            // entregando na taxa nominal — sintoma típico de QoS errada.
+            if W >= 2 {
+                let spanMs = tsSnapshot.last! - tsSnapshot.first!
+                let avgWindowSec = Double(spanMs) / Double(max(1, W - 1)) / 1000.0
+                let nominal = Double(self.appConstants.windowSize)
+                          / self.appConstants.sensorFrequencyHz
+                let ratio = avgWindowSec / nominal
+                print(String(format: "[TIMER] Janela média: %.1fs real vs %.1fs nominal "
+                             + "(ratio = %.2fx). Esperado: ratio ≈ 1.00",
+                             avgWindowSec, nominal, ratio))
+            }
+
+            // 2) Normalização global por canal (paridade exata com Python).
+            print("[CLUSTERING] Normalizando \(W) janelas (μ/σ por canal sobre a sessão)")
+            let normalizedWindows = self.normalizeWindowsSessionWide(windowsToProcess)
+
+            // 3) Inferência TFC janela a janela. Para coleta de 2h ≈ 480 janelas;
+            // cada inferência ~10-50ms no ANE → ~5-25s total. Aceitável como
+            // operação on-demand.
+            let D = self.appConstants.embeddingDim
+            var embeddings = [Float]()
+            embeddings.reserveCapacity(W * D)
+            var skipped = 0
+            for (i, w) in normalizedWindows.enumerated() {
+                if let emb = self.embedSingleNormalizedWindow(w, windowStartMs: tsSnapshot[i]) {
+                    embeddings.append(contentsOf: emb)
+                } else {
+                    // Não pula silenciosamente — falha de inferência em UMA janela
+                    // quebra o alinhamento com `windowTimestamps`. Aborta clustering.
+                    skipped += 1
+                }
+                if (i + 1) % 50 == 0 {
+                    DispatchQueue.main.async {
+                        self.mlStatusMessage = "TFC: \(i + 1)/\(W) janelas"
+                    }
+                }
+            }
+            guard skipped == 0, embeddings.count == W * D else {
+                DispatchQueue.main.async {
+                    self.mlStatusMessage = "Inferência TFC falhou em \(skipped) janela(s)"
+                }
+                print("[CLUSTERING] Abortado — \(skipped) inferências falharam")
+                return
+            }
+
+            // Sanity: range dos embeddings depois da normalização correta. Se
+            // ainda saírem em escala absurda, há outro problema (e.g., μ/σ
+            // mal-computado, ou input vindo torto pro modelo).
+            let eMin = embeddings.min() ?? 0
+            let eMax = embeddings.max() ?? 0
+            print("[CLUSTERING] Embeddings prontos: W=\(W), D=\(D), range=[\(eMin), \(eMax)]")
+
+            // 4) Linkage adjacente Ward + fcluster + episodes em ms.
             let (episodes, labels) = EpisodeBuilder.computeEpisodes(
-                embeddings: embSnapshot,
+                embeddings: embeddings,
                 W: W,
                 D: D,
                 windowStartTimestamps: tsSnapshot,
@@ -555,24 +795,16 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
                 utils: self.utils
             )
 
-            // Para compat com a UI (linkageMatrix exposto), expor só o número
-            // de linhas — re-gerar Z aqui seria desperdício porque já foi
-            // computado dentro de computeEpisodes.
             let linkageRowCount = W - t
 
             DispatchQueue.main.async {
                 self.linkageMatrix = [[Float]](repeating: [], count: max(0, linkageRowCount))
                 self.clusterLabels = labels
                 self.episodes = episodes
+                self.mlStatusMessage = "Pronto: \(episodes.count) episódios"
             }
 
-            print("[CLUSTERING] Pronto. Clusters alvo: \(t), Labels: \(labels.count), Episódios: \(episodes.count)")
-
-            // Recomputa groupSeries da última sessão para alimentar o
-            // CombinedSensorsChartView. Roda na mesma fila background.
-//            if let sid = self.lastSessionId {
-//                self.populateGroupSeries(forSession: sid)
-//            }
+            print("[CLUSTERING] Pronto. K=\(t), W=\(W), episódios=\(episodes.count)")
         }
     }
 
@@ -586,71 +818,84 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
 
     private let targetPlotPoints = 2000
 
-    /// Lê SensorReading da sessão indicada, computa as séries por grupo (acc,
-    /// gyro) e publica em `groupSeries`. Roda em background context.
-//    func populateGroupSeries(forSession sessionId: UUID) {
-//        let ctx = PersistenceController.shared.container.newBackgroundContext()
-//        ctx.perform {
-//            let req: NSFetchRequest<SensorReading> = SensorReading.fetchRequest()
-//            req.predicate = NSPredicate(format: "sessionId == %@", sessionId as CVarArg)
-//            req.sortDescriptors = [NSSortDescriptor(key: "timestamp", ascending: true)]
-//            req.returnsObjectsAsFaults = false
-//            req.fetchBatchSize = 1000
-//
-////            guard let readings = try? ctx.fetch(req), !readings.isEmpty else {
-////                DispatchQueue.main.async { self.groupSeries = [] }
-////                return
-////            }
-//
-//            let N = readings.count
-//            let target = self.targetPlotPoints
-//            // Downsample por janela fixa de média. Para coletas curtas (N <= target),
-//            // window = 1 → vira identidade.
-//            let window = max(1, N / target)
-//
-//            var accSamples: [SensorGroupSample] = []
-//            var gyroSamples: [SensorGroupSample] = []
-//            accSamples.reserveCapacity(N / window + 1)
-//            gyroSamples.reserveCapacity(N / window + 1)
-//
-//            var i = 0
-//            while i < N {
-//                let end = min(N, i + window)
-//                var accSum: Double = 0
-//                var gyroSum: Double = 0
-//                var tsSum: Double = 0
-//                let k = end - i
-//                for j in i..<end {
-//                    let r = readings[j]
-//                    accSum += Double(r.ax + r.ay + r.az) / 3.0
-//                    gyroSum += Double(r.gx + r.gy + r.gz) / 3.0
-//                    tsSum += Double(r.timestamp)
-//                    // Libera fault — não precisamos manter o objeto carregado.
-//                    ctx.refresh(r, mergeChanges: false)
-//                }
-//                let kd = Double(k)
-//                let tsAvg = tsSum / kd
-//                let date = Date(timeIntervalSince1970: tsAvg / 1000.0)
-//                accSamples.append(SensorGroupSample(timestamp: date,
-//                                                    value: accSum / kd,
-//                                                    group: "Accelerometer"))
-//                gyroSamples.append(SensorGroupSample(timestamp: date,
-//                                                     value: gyroSum / kd,
-//                                                     group: "Gyroscope"))
-//                i = end
-//            }
-//
-//            let series: [SensorGroupSeries] = [
-//                SensorGroupSeries(name: "Accelerometer", samples: accSamples),
-//                SensorGroupSeries(name: "Gyroscope",     samples: gyroSamples),
-//            ]
-//
-//            DispatchQueue.main.async {
-//                self.groupSeries = series
-//            }
-//            print("[GROUPSERIES] Pronto: \(accSamples.count) pontos por grupo (window=\(window), N=\(N))")
-//        }
-//    }
+    /// Lê SensorReading da sessão indicada e computa as séries por grupo
+    /// (acelerômetro + giroscópio), prontas para o `CombinedSensorsChartView`.
+    ///
+    /// PORQUÊ ASYNC: a versão anterior tinha um bug — `ctx.perform { ... }` é
+    /// assíncrono, então `return groupSeries` na função externa rodava ANTES
+    /// do bloco terminar e sempre devolvia `[]`. Usamos `withCheckedContinuation`
+    /// para esperar de verdade — mesmo padrão de `gatherEpisodePoints`.
+    ///
+    /// Uso em SwiftUI:
+    /// ```swift
+    /// Button { Task {
+    ///     let series = await sensorManager.populateGroupSeries(forSession: sid)
+    ///     // usa series direto na sheet
+    /// } }
+    /// ```
+    func populateGroupSeries(forSession sessionId: UUID) async -> [SensorGroupSeries] {
+        return await withCheckedContinuation { continuation in
+            let ctx = PersistenceController.shared.container.newBackgroundContext()
+            ctx.perform {
+                let req: NSFetchRequest<SensorReading> = SensorReading.fetchRequest()
+                req.predicate = NSPredicate(format: "sessionId == %@", sessionId as CVarArg)
+                req.sortDescriptors = [NSSortDescriptor(key: "timestamp", ascending: true)]
+                req.returnsObjectsAsFaults = false
+                req.fetchBatchSize = 1000
+
+                guard let readings = try? ctx.fetch(req), !readings.isEmpty else {
+                    continuation.resume(returning: [])
+                    return
+                }
+
+                let N = readings.count
+                let target = self.targetPlotPoints
+                // Downsample por janela fixa de média. Para coletas curtas
+                // (N <= target), window = 1 → vira identidade.
+                let window = max(1, N / target)
+
+                var accSamples: [SensorGroupSample] = []
+                var gyroSamples: [SensorGroupSample] = []
+                accSamples.reserveCapacity(N / window + 1)
+                gyroSamples.reserveCapacity(N / window + 1)
+
+                var i = 0
+                while i < N {
+                    let end = min(N, i + window)
+                    var accSum: Double = 0
+                    var gyroSum: Double = 0
+                    var tsSum: Double = 0
+                    let k = end - i
+                    for j in i..<end {
+                        let r = readings[j]
+                        accSum += Double(r.ax + r.ay + r.az) / 3.0
+                        gyroSum += Double(r.gx + r.gy + r.gz) / 3.0
+                        tsSum += Double(r.timestamp)
+                        // Libera fault — não precisamos manter o objeto carregado.
+                        ctx.refresh(r, mergeChanges: false)
+                    }
+                    let kd = Double(k)
+                    let tsAvg = tsSum / kd
+                    let date = Date(timeIntervalSince1970: tsAvg / 1000.0)
+                    accSamples.append(SensorGroupSample(timestamp: date,
+                                                        value: accSum / kd,
+                                                        group: "Accelerometer"))
+                    gyroSamples.append(SensorGroupSample(timestamp: date,
+                                                         value: gyroSum / kd,
+                                                         group: "Gyroscope"))
+                    i = end
+                }
+
+                let series: [SensorGroupSeries] = [
+                    SensorGroupSeries(name: "Accelerometer", samples: accSamples),
+                    SensorGroupSeries(name: "Gyroscope",     samples: gyroSamples),
+                ]
+                print("[GROUPSERIES] Pronto: \(accSamples.count) pontos por grupo "
+                      + "(window=\(window), N=\(N))")
+                continuation.resume(returning: series)
+            }
+        }
+    }
 
     // MARK: - GPS points by episode (alimenta EpisodesMapView)
     //
