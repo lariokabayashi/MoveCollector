@@ -255,9 +255,9 @@ struct Utils {
     ///     d(c, novo)² = ((|c|+|A|)/T) d(c,A)² + ((|c|+|B|)/T) d(c,B)² - (|c|/T) d(A,B)²
     ///   com T = |c| + |A| + |B|. Idêntico ao `dist_sub` recursivo do Python.
     /// - Distância base: euclidiana NÃO-ao-quadrado (sqrt do somatório).
-    /// - Empate: `argmin` do numpy retorna o PRIMEIRO mínimo em ordem; o heap
-    ///   Swift retorna em ordem de inserção (estabilidade preservada para
-    ///   distâncias iguais — vale conferir em coletas reais).
+    /// - Empate: resolvido deterministicamente pelo `AdjPair.<` (por `left`,
+    ///   depois `right`), reproduzindo a semântica do `np.argmin` "primeiro
+    ///   mínimo em ordem de array" do Python. Ver `AdjPair` em DataStructures.swift.
     func linkageAdjacentWard(_ matrix: [[Float]], stopAtK k: Int) -> [[Float]] {
         guard !matrix.isEmpty else { return [] }
         let nSamples = matrix.count
@@ -367,31 +367,51 @@ struct Utils {
 
             aliveVersion[newId] = max(aliveVersion[pair.left], aliveVersion[pair.right]) + 1
 
-            // Remove dist entries for merged clusters with other clusters
-            for c in clusters where c != newId {
-                dist[PairKey(u: pair.left, v: c)] = nil
-                dist[PairKey(u: pair.right, v: c)] = nil
-            }
-            dist[PairKey(u: pair.left, v: pair.right)] = nil
+            // ============================================================
+            // FIX A (2026-05-27): ordem crítica para evitar leitura de cache
+            // já invalidado.
+            //
+            // Bug original: o loop de invalidação rodava ANTES do loop de Ward,
+            // que reapagava `dist[left, c]` / `dist[right, c]` e logo depois
+            // tentava ler EXATAMENTE essas chaves. Como `getDistance` só
+            // recomputa para amostras originais (u < nSamples && v < nSamples),
+            // qualquer cluster já mesclado caía no fallback retornando
+            // `Float.greatestFiniteMagnitude`. Em Float, isso eleva ao quadrado
+            // dá `+inf`, e a partir do 2º merge a árvore de linkage ficava
+            // determinada por "ordem no heap", não por similaridade Ward real.
+            //
+            // Correção: rodar a fórmula de Ward PRIMEIRO (lendo cache válido),
+            // só depois invalidar entradas obsoletas. As chaves gravadas
+            // (`dist[newId, c]`) e as apagadas (`dist[left/right, c]`) são
+            // disjuntas, então a reordenação é segura.
+            // ============================================================
 
-            // Update distances with new cluster using Ward formula
+            // 1) Ward update PRIMEIRO — lê cache ainda válido de d(left, c) / d(right, c).
             for c in clusters where c != newId {
                 let sizeA = sizeLeft
                 let sizeB = sizeRight
                 let sizeC = clusterSize[c] ?? 1.0
-                
-                // Use cached or lazy-computed distances
+
                 let keyAC = PairKey(u: pair.left, v: c)
                 let keyBC = PairKey(u: pair.right, v: c)
                 let dAC = dist[keyAC] ?? getDistance(pair.left, c)
                 let dBC = dist[keyBC] ?? getDistance(pair.right, c)
                 let dAB = minDist
-                
+
                 let T = sizeA + sizeB + sizeC
-                let newDistSquared = ((sizeC + sizeA) / T) * dAC * dAC + ((sizeC + sizeB) / T) * dBC * dBC - (sizeC / T) * dAB * dAB
+                let newDistSquared = ((sizeC + sizeA) / T) * dAC * dAC
+                                   + ((sizeC + sizeB) / T) * dBC * dBC
+                                   - (sizeC / T) * dAB * dAB
                 let newDist = sqrt(max(0, newDistSquared))
                 dist[PairKey(u: newId, v: c)] = newDist
             }
+
+            // 2) SÓ AGORA descarta as entradas dos clusters fundidos.
+            for c in clusters where c != newId {
+                dist[PairKey(u: pair.left, v: c)] = nil
+                dist[PairKey(u: pair.right, v: c)] = nil
+            }
+            dist[PairKey(u: pair.left, v: pair.right)] = nil
 
             // Atualiza pares adjacentes afetados
             if p - 1 >= 0 {

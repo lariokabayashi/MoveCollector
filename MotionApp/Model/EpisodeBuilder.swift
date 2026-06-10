@@ -7,20 +7,33 @@
 //
 //  Esta camada vive **acima** do `Utils.swift` (que tem o linkage Ward + fcluster
 //  parcial) e **abaixo** do ViewModel: o ViewModel chama `EpisodeBuilder.run(...)`
-//  passando embeddings (256-d por janela) + timestamps de janela, e recebe
+//  passando embeddings (768-d por janela, particionado) + timestamps de janela, e recebe
 //  `[Episode]` com `startMs` / `endMs` / `label` prontos para visualização.
 //
 
 import Foundation
 
-/// Um episódio derivado do clustering. `startMs`/`endMs` são timestamps Unix-ms
-/// do PRIMEIRO sample da PRIMEIRA janela do episódio, e do PRIMEIRO sample da
-/// ÚLTIMA janela do episódio, respectivamente.
+/// Um episódio derivado do clustering. Paridade EXATA com Python, o que
+/// implica uma semântica assimétrica para `endMs` que vale registrar:
 ///
-/// Por que NÃO usar `endMs = primeira_sample_da_próxima_janela - 1`:
-/// a referência Python usa `dataset.window_timestamp(end_idx, 0)`, ou seja, o
-/// timestamp do primeiro sample da última janela do episódio. Mantemos paridade
-/// exata para que o eixo X dos plots / o mapa caiam no mesmo lugar.
+/// - Para o ÚLTIMO episódio da sequência: `endMs` = ts do primeiro sample
+///   da última janela DESTE episódio (`end` em `getStartEndLabel` = `len - 1`).
+///
+/// - Para episódios INTERMEDIÁRIOS: `endMs` = ts do primeiro sample da
+///   PRIMEIRA janela do PRÓXIMO episódio (`end` em `getStartEndLabel` = `i`
+///   no momento da transição). Ou seja, há um *overlap de fronteira* de 1
+///   janela: `episode[i].endMs == episode[i+1].startMs`.
+///
+/// Consequências:
+/// - `durationMs` de episódios intermediários inclui implicitamente a janela
+///   do próximo episódio. Para usar como duração real, faça
+///   `min(endMs - startMs, próximo.startMs - startMs)`.
+/// - Em `gatherEpisodePoints`, um ponto GPS exatamente na fronteira (ts ==
+///   `episode.endMs`) é atribuído ao episódio anterior. Em prática isso é
+///   1 ponto em milhares — irrelevante visualmente, mas vale saber.
+///
+/// Mantemos essa semântica deliberadamente para que o eixo X dos plots
+/// (Plotly Python e Swift Charts) caia exatamente nas mesmas posições.
 struct Episode: Identifiable, Equatable {
     let id = UUID()
     let label: Int      // 1-based, igual ao `fcluster_custom` do Python
@@ -97,7 +110,7 @@ enum EpisodeBuilder {
     /// Pipeline completa: embeddings → linkage adjacente Ward → fcluster → episodes.
     ///
     /// - Parameters:
-    ///   - embeddings: buffer flat row-major (W, D) float32. D normalmente = 256.
+    ///   - embeddings: buffer flat row-major (W, D) float32. D = 768 (particionado) ou 256 (monolítico).
     ///   - W: número de janelas.
     ///   - D: dimensão do embedding.
     ///   - windowStartTimestamps: timestamps Unix-ms do início de cada janela. Tamanho W.

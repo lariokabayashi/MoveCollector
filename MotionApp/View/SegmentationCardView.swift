@@ -158,7 +158,6 @@ struct SegmentationCardView: View {
         }
         .sheet(isPresented: $showMap) {
             EpisodesMapView(points: mapPoints)
-                .ignoresSafeArea()
         }
         .sheet(isPresented: $showCombinedSensors) {
             CombinedSensorsChartView(

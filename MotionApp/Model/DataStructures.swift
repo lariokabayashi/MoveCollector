@@ -31,7 +31,19 @@ struct AdjPair: Comparable {
     let right: Int
     let dist: Float
     let version: Int
-    static func < (lhs: AdjPair, rhs: AdjPair) -> Bool { lhs.dist < rhs.dist }
+
+    /// Comparador com desempate determinístico por `left` (e depois `right`).
+    /// Sem o desempate, distâncias empatadas resolviam por ordem de inserção
+    /// no heap — comportamento que diverge do `np.argmin` do Python, que
+    /// devolve o PRIMEIRO mínimo em ordem de array. Em sinais quase-constantes
+    /// (muitas distâncias iguais), isso causava fronteiras de episódio
+    /// divergentes entre Swift e Python. Comparar por `left` (índice esquerdo
+    /// do par) reproduz a semântica do "primeiro em ordem".
+    static func < (lhs: AdjPair, rhs: AdjPair) -> Bool {
+        if lhs.dist != rhs.dist { return lhs.dist < rhs.dist }
+        if lhs.left != rhs.left { return lhs.left < rhs.left }
+        return lhs.right < rhs.right
+    }
 }
 
 struct BinaryMinHeap<T: Comparable> {

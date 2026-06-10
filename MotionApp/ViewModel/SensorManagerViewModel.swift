@@ -9,15 +9,17 @@
 //  - Adicionado: escrita incremental de SensorReading em contexto background dedicado,
 //    com batching por saveThreshold e tag de sessionId por coleta
 //
-//  Refatorado (Etapa E — TFC migration) — 2026-05-22:
-//  - Removido: CNN_PFF_2D_backbone + data2D + data2DAccumulator (feature maps por tick)
-//  - Adicionado: TFCFeatureExtractor (TFC_Backbone.mlpackage) com embeddings
-//    256-d (concat z_t + z_f) por JANELA (não por tick).
-//  - Adicionado: GPS entra como canal feature (lat, lon, alt, hAcc, vAcc) —
-//    pipeline 11-canal igual ao Python.
-//  - Adicionado: windowTimestamps acumulator (Int64 ms) preserva timestamp
-//    de início de cada janela — usado pelo EpisodeBuilder.
-//  - Mudou: runDailyClustering devolve `[Episode]` direto, não só rótulos.
+//  Refatorado (Etapa E — TFC migration monolítica) — 2026-05-22:
+//  - Removido: CNN_PFF_2D_backbone + data2D + data2DAccumulator
+//  - Adicionado: TFCFeatureExtractor monolítico (11ch → 256d) + GPS como canal
+//  - Adicionado: windowTimestamps + episode boundaries em ms
+//
+//  Refatorado (Etapa F — TFC particionado) — 2026-05-27:
+//  - Substituído: TFCFeatureExtractor monolítico por 3 backbones particionados
+//    (Acc 3ch, Gyro 3ch, GPS 3ch — lat/lon/alt apenas).
+//  - Embedding por janela: 768d (concat das 3 partições × 256d cada).
+//  - API pública do extractor inalterada: ViewModel não precisa mudar nada
+//    além de ler `appConstants.embeddingDim` que agora retorna 768.
 //
 
 import SwiftUI
@@ -417,16 +419,19 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
         }
     }
 
-    // MARK: - Pipeline TFC (substitui o CNN antigo)
+    // MARK: - Pipeline TFC particionada
     //
-    // PARIDADE COM PYTHON (FeatureExtractor):
-    // - Janelas NÃO overlapping (step = window). O Python usa
-    //   `step_size = window_size = 300` no FeatureExtractor.
-    // - Por janela: feed `(x_t, x_f=|FFT|(x_t))` no backbone, lê `z_t`+`z_f`,
-    //   concatena → embedding 256-d. Acumula um por janela.
-    // - Timestamp da janela = ts da PRIMEIRA amostra da janela. Mantemos a
-    //   mesma definição em `windowTimestamps` para que o EpisodeBuilder
-    //   reproduza os boundaries do Python.
+    // PARIDADE COM PYTHON (FeatureExtractor._partitioned_call):
+    // - Janelas NÃO overlapping (step = window = 300 samples = 15s @ 20Hz).
+    // - Para cada janela cru, 3 backbones independentes processam fatias
+    //   distintas de canais:
+    //     • Acc backbone:  canais [0,1,2] (acc_x/y/z)
+    //     • Gyro backbone: canais [3,4,5] (gyro_x/y/z)
+    //     • GPS backbone:  canais [6,7,8] (lat/lon/alt — hAcc/vAcc NÃO entram)
+    // - Cada backbone consome `(x_t, x_f=|FFT|(x_t))` shape [1, 3, 300]
+    //   e devolve `(z_t, z_f)` de 128d cada. Concatenamos as 3 partições →
+    //   embedding final 768d (3 × 256).
+    // - Timestamp da janela = ts da PRIMEIRA amostra da janela.
 
     /// Acumula um snapshot multi-canal (acc xyz + gyro xyz + GPS 5x).
     /// Quando o buffer fecha (= 300 amostras = 15 s @ 20 Hz), dispara
@@ -485,100 +490,132 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
         }
     }
 
-    /// Detecta janelas em que TODA a janela tem `hAcc <= 0` (= sem fix de GPS)
-    /// e backfilla os 5 canais GPS dessas janelas com a média das primeiras
-    /// janelas COM fix. Modifica `windows` in-place.
+    /// Detecta TODAS as janelas em que TODA a janela tem `hAcc <= 0` (= sem
+    /// fix de GPS) e backfilla os 5 canais GPS dessas janelas. Modifica
+    /// `windows` in-place.
     ///
-    /// PROBLEMA QUE RESOLVE:
-    /// Sem isso, janelas pré-fix carregam `(lat, lon, alt, hAcc, vAcc) = (0,0,0,0,0)`.
-    /// A normalização global por canal vê distribuição bimodal degenerada e
-    /// produz embeddings constantes pro bloco pré-fix → o linkage agrupa
-    /// tudo num cluster gigante (sintoma: "primeiro episódio de 1h22min").
+    /// FIX B (2026-05-27): a versão anterior só preenchia janelas no PREFIXO
+    /// da sessão (todas antes do primeiro fix). Quedas de GPS no MEIO da
+    /// coleta (túnel, prédio no meio do trajeto, transporte público
+    /// subterrâneo) continuavam zeradas — o que reintroduzia a distribuição
+    /// bimodal degenerada e gerava embedding constante no bloco do meio,
+    /// causando split/merge espúrio na fronteira.
     ///
-    /// LIMITAÇÃO: ainda assim, os canais GPS das janelas backfilladas ficam
-    /// constantes (já que usamos a MESMA leitura média de GPS). Isso significa
-    /// que dentro desse bloco o sub-sinal GPS não discrimina, mas pelo menos a
-    /// distribuição não é mais degenerada e o modelo vê valores plausíveis em
-    /// vez de zeros mágicos. Para resolver o problema arquitetural (modelo
-    /// monolítico de 11 canais vs. partitioned como o Python), precisaríamos
-    /// converter 3 .mlpackages separados (acc, gyro, GPS).
+    /// Estratégia agora: **forward-fill** com último GPS válido conhecido.
+    /// Para janelas no PREFIXO (sem fix anterior), usa média dos primeiros
+    /// fixes vindouros (backward-fill como aproximação inicial). Pra quedas
+    /// no meio, usa o último fix conhecido — assume continuidade espacial,
+    /// o que é razoável: nas escalas de tempo onde GPS some (segundos a
+    /// minutos), o usuário não teleporta.
     private func backfillPreFixGPSWindows(_ windows: inout [[Float]], W: Int) {
         let T = appConstants.windowSize
         let C = appConstants.nChannels
         let hAccCol = 9   // horizontal_accuracy (offset dentro de cada amostra)
 
-        // 1) Descobrir quantas janelas têm GPS ausente em TODOS os ticks.
-        //    "Ausente" = hAcc <= 0 (zero é nosso sentinela de "sem snapshot";
-        //    fixes reais sempre têm hAcc > 0 em metros).
-        var preFixCount = 0
+        // Helper: a janela `w` tem pelo menos um sample com fix?
+        @inline(__always)
+        func windowHasFix(_ w: [Float]) -> Bool {
+            for t in 0..<T where w[t * C + hAccCol] > 0 { return true }
+            return false
+        }
+
+        // Helper: média dos 5 canais GPS sobre os ticks com fix nessa janela.
+        // Retorna nil se a janela não tem nenhum tick com fix.
+        @inline(__always)
+        func meanGPSOfWindow(_ w: [Float]) -> (Float, Float, Float, Float, Float)? {
+            var sLat = 0.0, sLon = 0.0, sAlt = 0.0, sHAcc = 0.0, sVAcc = 0.0
+            var n = 0
+            for t in 0..<T where w[t * C + hAccCol] > 0 {
+                sLat += Double(w[t * C + 6])
+                sLon += Double(w[t * C + 7])
+                sAlt += Double(w[t * C + 8])
+                sHAcc += Double(w[t * C + 9])
+                sVAcc += Double(w[t * C + 10])
+                n += 1
+            }
+            guard n > 0 else { return nil }
+            let inv = 1.0 / Double(n)
+            return (Float(sLat * inv), Float(sLon * inv), Float(sAlt * inv),
+                    Float(sHAcc * inv), Float(sVAcc * inv))
+        }
+
+        // 1) Estatísticas de diagnóstico + localizar o primeiro fix.
+        var totalMissing = 0
         var firstWindowWithFix: Int? = nil
         for wIdx in 0..<W {
-            var anyFix = false
-            let w = windows[wIdx]
-            for t in 0..<T where w[t * C + hAccCol] > 0 {
-                anyFix = true
-                break
-            }
-            if anyFix {
+            if windowHasFix(windows[wIdx]) {
                 if firstWindowWithFix == nil { firstWindowWithFix = wIdx }
             } else {
-                if firstWindowWithFix == nil { preFixCount += 1 }
+                totalMissing += 1
             }
         }
 
-        // 2) Logging de diagnóstico — sempre útil pra confirmar a hipótese.
-        print("[GPS DIAG] W=\(W), janelas pré-fix (sem GPS) = \(preFixCount), "
-              + "primeira janela com fix = \(firstWindowWithFix.map(String.init) ?? "nenhuma")")
-
-        guard preFixCount > 0, let firstIdx = firstWindowWithFix else {
-            // Caso A: zero janelas pré-fix → tudo já tem GPS, nada a fazer.
-            // Caso B: NENHUMA janela tem fix → GPS nunca chegou. Backfilling não
-            // resolve; melhor deixar zerado e logar warning.
-            if firstWindowWithFix == nil {
-                print("[GPS DIAG] ⚠️ NENHUMA janela tem GPS válido — "
-                      + "modelo vai operar só com acc/gyro normalizados.")
-            }
+        guard let firstIdx = firstWindowWithFix else {
+            print("[GPS DIAG] ⚠️ W=\(W), NENHUMA janela tem GPS válido — "
+                  + "modelo vai operar só com acc/gyro normalizados.")
             return
         }
 
-        // 3) Calcular GPS médio das primeiras 10 janelas com fix
-        //    (10 = ~2.5 min de amostras com GPS já estabilizado).
-        let nWindowsForMean = min(10, W - firstIdx)
+        // 2) Computar GPS "seed" pro PREFIXO (média das primeiras 10 janelas
+        //    com fix — janelas iniciais com fix tendem a ter coordenadas bem
+        //    estabilizadas no ponto de partida do usuário).
         var sumLat = 0.0, sumLon = 0.0, sumAlt = 0.0
         var sumHAcc = 0.0, sumVAcc = 0.0
-        var nSamples = 0
-        for wIdx in firstIdx..<(firstIdx + nWindowsForMean) {
-            let w = windows[wIdx]
-            for t in 0..<T where w[t * C + hAccCol] > 0 {
-                sumLat += Double(w[t * C + 6])
-                sumLon += Double(w[t * C + 7])
-                sumAlt += Double(w[t * C + 8])
-                sumHAcc += Double(w[t * C + 9])
-                sumVAcc += Double(w[t * C + 10])
-                nSamples += 1
+        var seedN = 0
+        for wIdx in firstIdx..<min(firstIdx + 10, W) {
+            if let m = meanGPSOfWindow(windows[wIdx]) {
+                sumLat += Double(m.0); sumLon += Double(m.1); sumAlt += Double(m.2)
+                sumHAcc += Double(m.3); sumVAcc += Double(m.4)
+                seedN += 1
             }
         }
-        guard nSamples > 0 else { return }
-        let invN = 1.0 / Double(nSamples)
-        let fillLat = Float(sumLat * invN)
-        let fillLon = Float(sumLon * invN)
-        let fillAlt = Float(sumAlt * invN)
-        let fillHAcc = Float(sumHAcc * invN)
-        let fillVAcc = Float(sumVAcc * invN)
-        print("[GPS BACKFILL] Preenchendo \(preFixCount) janelas pré-fix com "
-              + "lat=\(fillLat) lon=\(fillLon) alt=\(fillAlt) "
-              + "(média de \(nSamples) amostras com fix)")
+        var lastValid: (Float, Float, Float, Float, Float)
+        if seedN > 0 {
+            let inv = 1.0 / Double(seedN)
+            lastValid = (Float(sumLat * inv), Float(sumLon * inv),
+                         Float(sumAlt * inv),
+                         Float(sumHAcc * inv), Float(sumVAcc * inv))
+        } else {
+            // Não deveria acontecer (firstIdx existe → meanGPSOfWindow nele
+            // retorna não-nil), mas guard defensivo.
+            return
+        }
 
-        // 4) Aplicar o backfill nas janelas pré-fix (todas antes de `firstIdx`).
-        for wIdx in 0..<firstIdx {
-            for t in 0..<T {
-                windows[wIdx][t * C + 6] = fillLat
-                windows[wIdx][t * C + 7] = fillLon
-                windows[wIdx][t * C + 8] = fillAlt
-                windows[wIdx][t * C + 9] = fillHAcc
-                windows[wIdx][t * C + 10] = fillVAcc
+        let preFixCount = firstIdx       // janelas no prefixo
+        let midGapCount = totalMissing - preFixCount
+        print("[GPS DIAG] W=\(W), janelas sem GPS = \(totalMissing) "
+              + "(prefixo: \(preFixCount), mid-session: \(midGapCount)), "
+              + "1º fix: janela \(firstIdx). Seed (média de \(seedN) janelas): "
+              + "lat=\(lastValid.0) lon=\(lastValid.1) alt=\(lastValid.2)")
+
+        // 3) Forward-fill com último GPS válido conhecido.
+        //    - Pré-fix: usa seed (backward-fill efetivo) até alcançar firstIdx.
+        //    - Mid-gap: usa o último fix observado antes do gap.
+        var backfilledPrefix = 0
+        var backfilledMid = 0
+        for wIdx in 0..<W {
+            if windowHasFix(windows[wIdx]) {
+                // Janela com fix → atualiza "última leitura válida" e segue.
+                if let m = meanGPSOfWindow(windows[wIdx]) {
+                    lastValid = m
+                }
+            } else {
+                // Janela sem fix → preenche com `lastValid`.
+                for t in 0..<T {
+                    windows[wIdx][t * C + 6] = lastValid.0
+                    windows[wIdx][t * C + 7] = lastValid.1
+                    windows[wIdx][t * C + 8] = lastValid.2
+                    windows[wIdx][t * C + 9] = lastValid.3
+                    windows[wIdx][t * C + 10] = lastValid.4
+                }
+                if wIdx < firstIdx { backfilledPrefix += 1 }
+                else { backfilledMid += 1 }
             }
         }
+
+        print("[GPS BACKFILL] Preenchidas \(backfilledPrefix) janelas no prefixo "
+              + "+ \(backfilledMid) janelas no meio da sessão "
+              + "(total = \(backfilledPrefix + backfilledMid))")
     }
 
     /// Aplica `normalize_features("standard")` Python: para cada canal `c`,
@@ -643,8 +680,9 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
         return out
     }
 
-    /// Roda inferência TFC numa única janela JÁ NORMALIZADA (layout T,C row-major).
-    /// Devolve embedding 256-d flat.
+    /// Roda inferência TFC PARTICIONADA numa única janela JÁ NORMALIZADA
+    /// (layout T,C row-major, 11 canais). Devolve embedding 768d flat
+    /// (concat das 3 partições — Acc, Gyro, GPS — cada uma com 256d).
     private func embedSingleNormalizedWindow(_ buffer: [Float], windowStartMs: Int64) -> [Float]? {
         guard let extractor = tfcExtractor else { return nil }
         let T = appConstants.windowSize
@@ -684,8 +722,8 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
     // PARIDADE COM PYTHON (`FeatureExtractor.__init__` + `__call__` + `Run_Daily_Clustering`):
     //  1. `normalize_features(sensors.features, "standard")` — μ/σ por canal
     //     sobre a sessão inteira (todas as amostras de todas as janelas).
-    //  2. Para cada janela normalizada, roda o `TFC_Backbone` e concatena
-    //     `[z_t, z_f]` → embedding 256-d.
+    //  2. Para cada janela normalizada, roda OS 3 backbones particionados
+    //     (Acc, Gyro, GPS) e concatena os embeddings → 768d.
     //  3. `linkage_adjacent_ward(stopAtK)` + `fcluster_custom` sobre os embeddings.
     //  4. `get_start_end_label` + `episode_to_ms` produzem `[Episode]`.
 
