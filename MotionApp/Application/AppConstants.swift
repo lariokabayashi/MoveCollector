@@ -28,7 +28,11 @@ struct AppConstants{
     let windowSize = 300               // 15 sec @ 20 Hz (matches TFC_Backbone input)
     let stepSize = 300                 // sem overlap (idêntico ao Python step_size = window_size)
     let nChannels = 11                 // 11 features: acc xyz + gyro xyz + lat + lon + alt + hAcc + vAcc
-    let embeddingDim = 256             // concat(z_t [128], z_f [128])
+    //
+    // ETAPA F (TFC particionado): 3 backbones (Acc, Gyro, GPS) cada um produzindo
+    // 256d (concat z_t + z_f). Final = concat das 3 partições = 768d.
+    // Antes (monolítico, 11 canais) era 256.
+    let embeddingDim = 768             // 3 × (z_t[128] + z_f[128])
     let saveThreshold = 100            // Save every 100 seconds to prevent memory buildup
     let totalTime = .max as Int64
     
