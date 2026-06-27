@@ -11,12 +11,29 @@ import SwiftUI
 @available(iOS 26.0, *)
 struct SegmentationCardView: View {
     @ObservedObject var sensorManager: SensorManagerViewModel
+    @ObservedObject var labelStore: EpisodeLabelStore
     @Binding var targetEpisodes: Int
 
-    @State private var showMap = false
-    @State private var mapPoints: [EpisodePoint] = []
-    @State private var groupSeries: [SensorGroupSeries] = []
-    @State private var showCombinedSensors = false
+    /// Episódio cujo rótulo por voz está sendo editado (dispara o sheet).
+    @State private var labelingEpisode: Episode?
+
+    // Usamos `.sheet(item:)` (em vez de `.sheet(isPresented:)`) porque os dados
+    // são carregados de forma assíncrona logo antes de apresentar. Com
+    // `isPresented`, o SwiftUI capturava o conteúdo do sheet com os arrays ainda
+    // vazios na 1ª apresentação (mapa/gráfico em branco no primeiro toque).
+    // Passando o dado via `item`, o sheet é sempre construído com o valor pronto.
+    @State private var mapData: MapEpisodesData?
+    @State private var combinedData: CombinedSensorsData?
+
+    private struct MapEpisodesData: Identifiable {
+        let id = UUID()
+        let points: [EpisodePoint]
+    }
+
+    private struct CombinedSensorsData: Identifiable {
+        let id = UUID()
+        let series: [SensorGroupSeries]
+    }
 
     private static let tsFormatter: DateFormatter = {
         let f = DateFormatter()
@@ -103,11 +120,25 @@ struct SegmentationCardView: View {
                                 .frame(width: 8, height: 8)
                             Text("Ep \(ep.label)")
                                 .font(.caption)
-                                .frame(width: 50, alignment: .leading)
-                            Text("\(format(ep.startMs)) → \(format(ep.endMs))")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                                .frame(width: 44, alignment: .leading)
+                            if let label = labelStore.label(for: ep), !label.text.isEmpty {
+                                Text(label.text)
+                                    .font(.caption.weight(.medium))
+                                    .lineLimit(1)
+                            } else {
+                                Text("\(format(ep.startMs)) → \(format(ep.endMs))")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
                             Spacer()
+                            Button {
+                                labelingEpisode = ep
+                            } label: {
+                                Image(systemName: labelStore.label(for: ep)?.hasAudio == true
+                                      ? "mic.fill" : "mic")
+                                    .font(.caption)
+                            }
+                            .buttonStyle(.borderless)
                         }
                     }
                 }
@@ -115,8 +146,10 @@ struct SegmentationCardView: View {
                 Button {
                     Task {
                         if let sid = sensorManager.lastSessionId {
-                            mapPoints = await sensorManager.gatherEpisodePoints(forSession: sid)
-                            showMap = !mapPoints.isEmpty
+                            let points = await sensorManager.gatherEpisodePoints(forSession: sid)
+                            if !points.isEmpty {
+                                mapData = MapEpisodesData(points: points)
+                            }
                         }
                     }
                 } label: {
@@ -128,12 +161,12 @@ struct SegmentationCardView: View {
                 Button {
                     Task {
                         if let sid = sensorManager.lastSessionId {
-                            groupSeries = await sensorManager.populateGroupSeries(forSession: sid)
-                            showCombinedSensors = true
+                            let series = await sensorManager.populateGroupSeries(forSession: sid)
+                            combinedData = CombinedSensorsData(series: series)
                         }
                     }
                 } label: {
-                    Label("Abrir plot combined sensors", systemImage: "chart.xyaxis.line")
+                    Label("Abrir gráfico de sensores combinados", systemImage: "chart.xyaxis.line")
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
@@ -156,16 +189,19 @@ struct SegmentationCardView: View {
             let clamped = min(max(targetEpisodes, minK), max(2, min(newW, 30)))
             if clamped != targetEpisodes { targetEpisodes = clamped }
         }
-        .sheet(isPresented: $showMap) {
-            EpisodesMapView(points: mapPoints)
+        .sheet(item: $mapData) { data in
+            EpisodesMapView(points: data.points)
         }
-        .sheet(isPresented: $showCombinedSensors) {
+        .sheet(item: $combinedData) { data in
             CombinedSensorsChartView(
-                groupSeries: groupSeries,
+                groupSeries: data.series,
                 episodes: sensorManager.episodes,
                 displayTimezone: TimeZone.current
             )
             .padding()
+        }
+        .sheet(item: $labelingEpisode) { ep in
+            EpisodeAudioLabelView(episode: ep, store: labelStore)
         }
     }
 
@@ -212,3 +248,4 @@ struct SegmentationCardView: View {
         return "\(h) h \(m) min"
     }
 }
+

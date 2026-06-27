@@ -95,12 +95,17 @@ final class TFCFeatureExtractor {
     private let gyroModel: TFC_Backbone_Gyro
     private let gpsModel: TFC_Backbone_GPS
 
-    init() throws {
+    /// - Parameter computeUnits: política de compute do CoreML. O default
+    ///   `.cpuAndNeuralEngine` preserva o comportamento antigo (e o `init()`
+    ///   sem argumentos continua válido por causa do valor default). O
+    ///   benchmark de latência usa `.cpuOnly` para forçar a comparação ANE×CPU
+    ///   — é exatamente este o flag que torna o experimento possível.
+    init(computeUnits: MLComputeUnits = .cpuAndNeuralEngine) throws {
         let cfg = MLModelConfiguration()
         // CPU + ANE: o TFC é pequeno (conv1d + linear), roda muito bem no
         // Neural Engine quando disponível, com CPU como fallback. Carregar
         // os 3 modelos é instantâneo (~1ms cada) — não precisa otimizar load.
-        cfg.computeUnits = .cpuAndNeuralEngine
+        cfg.computeUnits = computeUnits
 
         self.accModel  = try TFC_Backbone_Acc(configuration: cfg)
         self.gyroModel = try TFC_Backbone_Gyro(configuration: cfg)
@@ -171,6 +176,76 @@ final class TFCFeatureExtractor {
             }
         }
         return out
+    }
+
+    // MARK: - Instrumentação (benchmark de latência)
+
+    /// Tempos por estágio de UMA janela, em nanosegundos (clock monotônico).
+    /// `modelNs` tem um elemento por partição na ordem de `kTFCPartitions`
+    /// (0=Acc, 1=Gyro, 2=GPS). `fftNs` é a soma das 3 FFTs por partição.
+    struct WindowTiming {
+        var fftNs: UInt64 = 0
+        var modelNs: [UInt64] = [0, 0, 0]
+        var totalNs: UInt64 = 0
+    }
+
+    /// Igual ao corpo interno de `embed(windowed:)` para UMA janela, mas
+    /// cronometrando cada estágio. Recebe a janela já no layout flat
+    /// `(C=inputChannels, T=windowSize)` row-major (igual ao que
+    /// `WindowedSensorDataset.window(at:)` produz). Usado só pelo
+    /// `LatencyBenchmark`; o caminho de produção continua em `embed(windowed:)`.
+    func embedTimedSingleWindow(_ windowFlat: [Float]) throws
+        -> (embedding: [Float], timing: WindowTiming) {
+        precondition(windowFlat.count == config.inputChannels * config.windowSize,
+                     "windowFlat deve ter inputChannels*windowSize = "
+                     + "\(config.inputChannels * config.windowSize) floats, "
+                     + "recebido \(windowFlat.count)")
+
+        let T = config.windowSize
+        let totalD = config.embeddingDim
+        let partD = config.partitionEmbeddingDim
+        let projD = config.projectionDim
+
+        var out = [Float](repeating: 0, count: totalD)
+        var timing = WindowTiming()
+        let tStart = DispatchTime.now().uptimeNanoseconds
+
+        for (pIdx, partition) in kTFCPartitions.enumerated() {
+            let partInput = extractPartitionInput(
+                windowFlat: windowFlat,
+                channelIndices: partition.channelIndices,
+                T: T
+            )
+            let xT = partInput
+
+            let fftStart = DispatchTime.now().uptimeNanoseconds
+            let xF = magnitudeFFTPerChannel(
+                buffer: partInput,
+                channels: config.channelsPerPartition,
+                timeSteps: T
+            )
+            let fftEnd = DispatchTime.now().uptimeNanoseconds
+            timing.fftNs &+= fftEnd &- fftStart
+
+            let mStart = DispatchTime.now().uptimeNanoseconds
+            let (zt, zf) = try runPartitionedModel(
+                partitionIndex: pIdx,
+                xT: xT, xF: xF,
+                C: config.channelsPerPartition,
+                T: T
+            )
+            let mEnd = DispatchTime.now().uptimeNanoseconds
+            timing.modelNs[pIdx] = mEnd &- mStart
+
+            let base = pIdx * partD
+            for i in 0..<projD {
+                out[base + i] = zt[i]
+                out[base + projD + i] = zf[i]
+            }
+        }
+
+        timing.totalNs = DispatchTime.now().uptimeNanoseconds &- tStart
+        return (out, timing)
     }
 
     // MARK: - Helpers internos

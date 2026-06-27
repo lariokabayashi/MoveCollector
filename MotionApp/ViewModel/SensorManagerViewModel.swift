@@ -107,6 +107,19 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
     private let embeddingsLock = NSLock()
     private let embeddingsCapWindows = 4000
 
+    /// Bookkeeping de warm-up: conta TODAS as janelas completas processadas nesta
+    /// coleta (incluindo as descartadas). Só mutado dentro de `tfcQueue` (serial),
+    /// então não precisa de lock próprio. Reset em `startCollection()` /
+    /// `resetEmbeddings()`.
+    ///
+    /// CRITICAL — NÃO REMOVER (ver AppConstants.warmupWindowCount): enquanto este
+    /// contador for <= `appConstants.warmupWindowCount`, a janela é IGNORADA para
+    /// acumulação. Isso descarta os artefatos de startup (toque no botão Start,
+    /// warm-up da CoreMotion, estabilização do GPS, usuário guardando o telefone)
+    /// que, sem o descarte, viram um cluster singleton espúrio e divergem do
+    /// notebook Python.
+    private var completedWindowsSeen: Int = 0
+
     /// Fila serial dedicada ao pipeline TFC (window-buffering + inferência).
     /// Por quê: a inferência CoreML pode levar dezenas de ms; rodar na main
     /// causaria stutter a cada 15s (uma janela = 15s @ 20Hz). Por quê serial:
@@ -175,6 +188,15 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
         currentSessionId = sessionId
         appDelegate?.currentSessionId = sessionId
         print("🎯 Nova sessão de coleta: \(sessionId.uuidString)")
+
+        // WARM-UP: zera o contador a cada início de coleta. Cada coleta tem seu
+        // próprio transiente de startup (toque no Start + reposicionamento do
+        // telefone), então o descarte das primeiras `warmupWindowCount` janelas
+        // tem que valer por coleta — não só na primeira da vida do app.
+        // Feito na tfcQueue (serial) para não competir com appendWindowSample.
+        tfcQueue.async { [weak self] in
+            self?.completedWindowsSeen = 0
+        }
 
         // Configurar frequências
         motionManager.deviceMotionUpdateInterval = appConstants.sensorUpdateInterval
@@ -466,6 +488,30 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
             windowBuffer.removeAll(keepingCapacity: true)
             windowSampleTimestamps.removeAll(keepingCapacity: true)
 
+            // WARM-UP — CRITICAL, NÃO REMOVER (ver AppConstants.warmupWindowCount).
+            //
+            // Conta a janela para bookkeeping ANTES de decidir acumular. As
+            // primeiras `warmupWindowCount` janelas completas são DESCARTADAS:
+            // elas concentram artefatos de startup (toque no botão Start, warm-up
+            // da CoreMotion, estabilização do GPS, usuário guardando o telefone)
+            // que, se acumulados, viram um cluster singleton espúrio no Ward e
+            // afastam o resultado do notebook Python. A janela descartada é
+            // contada aqui, mas NÃO entra em `rawWindowsAccumulator`.
+            //
+            // Exemplo (warmupWindowCount = 1):
+            //   • Janela #1 → completedWindowsSeen vira 1, 1 <= 1 → ignorada.
+            //   • Janela #2 → completedWindowsSeen vira 2, 2 > 1  → acumulada.
+            completedWindowsSeen += 1
+            let warmup = appConstants.warmupWindowCount
+            if completedWindowsSeen <= warmup {
+                let seen = completedWindowsSeen
+                DispatchQueue.main.async {
+                    self.mlStatusMessage =
+                        "Warm-up: janela \(seen)/\(warmup) descartada (artefatos de startup)"
+                }
+                return
+            }
+
             // NÃO roda TFC aqui. Acumula a janela CRUA — a normalização global
             // (μ/σ por canal sobre toda a sessão) só pode ser calculada quando
             // todas as janelas estiverem em mãos. Isso bate exatamente com o
@@ -709,6 +755,11 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
         rawWindowsAccumulator.removeAll(keepingCapacity: false)
         windowTimestamps.removeAll(keepingCapacity: false)
         embeddingsLock.unlock()
+        // WARM-UP: reinicia o bookkeeping para que a próxima janela volte a ser
+        // tratada como janela de startup (descartada). Serial na tfcQueue.
+        tfcQueue.async { [weak self] in
+            self?.completedWindowsSeen = 0
+        }
         DispatchQueue.main.async {
             self.episodes = []
             self.clusterLabels = []
@@ -737,6 +788,21 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
             let tsSnapshot = self.windowTimestamps
             self.embeddingsLock.unlock()
 
+            // Pipeline compartilhado com a recuperação a partir do disco.
+            self.clusterRawWindows(rawWindows, timestamps: tsSnapshot, t: t)
+        }
+    }
+
+    /// Núcleo do clustering, compartilhado entre a coleta ao vivo
+    /// (`runDailyClustering`) e a recuperação a partir do disco
+    /// (`runClusteringFromStore`). Recebe as janelas CRUAS já snapshotadas
+    /// (11 canais × windowSize, layout T×C row-major) e seus timestamps de
+    /// início. Roda: backfill GPS pré-fix → normalização global → inferência
+    /// TFC por janela → linkage Ward + episódios → publica em @Published.
+    ///
+    /// DEVE rodar numa fila de background (os dois callers já despacham para
+    /// `.global(qos: .userInitiated)`); contém I/O de inferência pesado.
+    private func clusterRawWindows(_ rawWindows: [[Float]], timestamps tsSnapshot: [Int64], t: Int) {
             let W = tsSnapshot.count
 
             guard W >= 2 else {
@@ -843,13 +909,174 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
             }
 
             print("[CLUSTERING] Pronto. K=\(t), W=\(W), episódios=\(episodes.count)")
+    }
+
+    // MARK: - Recuperação a partir do disco (reconstrução de janelas)
+    //
+    // Permite recomputar episódios de uma coleta JÁ PERSISTIDA — mesmo após o
+    // BGTask ter sido terminado pelo sistema e o estado em memória
+    // (`rawWindowsAccumulator`) ter sido perdido. Reconstrói as janelas cruas a
+    // partir de SensorReading (+ GPS de LocationEntity) e alimenta o MESMO
+    // pipeline da coleta ao vivo, garantindo paridade.
+
+    /// Reconstrói as janelas cruas (11 canais × `windowSize`) e seus timestamps
+    /// de início a partir do que está persistido para `sessionId`, reproduzindo
+    /// fielmente o windowing ao vivo de `appendWindowSample`:
+    ///   - merge GPS por two-pointer (último fix com ts <= amostra; zeros antes
+    ///     do 1º fix, idêntico a `lastGPSSnapshot ?? 0`);
+    ///   - ordem dos canais: ax, ay, az, gx, gy, gz, lat, lon, alt, hAcc, vAcc;
+    ///   - janelas de `windowSize` amostras consecutivas (descarta a janela
+    ///     parcial final, como o buffer ao vivo);
+    ///   - descarta as primeiras `warmupWindowCount` janelas (warm-up por coleta).
+    /// Roda dentro do `ctx.performAndWait` do chamador.
+    private func rebuildWindowsFromStore(sessionId: UUID,
+                                         ctx: NSManagedObjectContext)
+        -> (windows: [[Float]], timestamps: [Int64]) {
+
+        let windowSize = appConstants.windowSize
+        let warmup = appConstants.warmupWindowCount
+
+        // GPS da sessão, materializado uma vez (acesso O(1) no merge).
+        let locFetch: NSFetchRequest<LocationEntity> = LocationEntity.fetchRequest()
+        locFetch.predicate = NSPredicate(format: "sessionId == %@", sessionId as CVarArg)
+        locFetch.sortDescriptors = [NSSortDescriptor(key: "timestamp", ascending: true)]
+        locFetch.returnsObjectsAsFaults = false
+        let locations = (try? ctx.fetch(locFetch)) ?? []
+
+        // Amostras de sensor da sessão, streaming via fetchBatchSize.
+        let sensorFetch: NSFetchRequest<SensorReading> = SensorReading.fetchRequest()
+        sensorFetch.predicate = NSPredicate(format: "sessionId == %@", sessionId as CVarArg)
+        sensorFetch.sortDescriptors = [NSSortDescriptor(key: "timestamp", ascending: true)]
+        sensorFetch.fetchBatchSize = 500
+        guard let sensors = try? ctx.fetch(sensorFetch), !sensors.isEmpty else {
+            return ([], [])
+        }
+
+        var windows: [[Float]] = []
+        var timestamps: [Int64] = []
+        var current: [Float] = []
+        current.reserveCapacity(windowSize * appConstants.nChannels)
+        var currentFirstTs: Int64 = 0
+        var completedWindows = 0
+        var locIdx = -1   // -1 = ainda sem GPS para esta amostra (pré-fix)
+
+        for sensor in sensors {
+            let ts = sensor.timestamp
+            // Avança locIdx enquanto a PRÓXIMA location tem ts <= amostra.
+            while locIdx + 1 < locations.count
+                  && locations[locIdx + 1].timestamp <= ts {
+                locIdx += 1
+            }
+            if current.isEmpty { currentFirstTs = ts }
+
+            current.append(sensor.ax)
+            current.append(sensor.ay)
+            current.append(sensor.az)
+            current.append(sensor.gx)
+            current.append(sensor.gy)
+            current.append(sensor.gz)
+            if locIdx >= 0 {
+                let loc = locations[locIdx]
+                current.append(loc.latitude)
+                current.append(loc.longitude)
+                current.append(loc.altitude)
+                current.append(loc.horizontalAccuracy)
+                current.append(loc.verticalAccuracy)
+            } else {
+                // Pré-fix: zeros nos 5 canais GPS (paridade com lastGPSSnapshot ?? 0).
+                current.append(0); current.append(0); current.append(0)
+                current.append(0); current.append(0)
+            }
+
+            if current.count == windowSize * appConstants.nChannels {
+                completedWindows += 1
+                // Warm-up: descarta as primeiras `warmup` janelas completas.
+                if completedWindows > warmup {
+                    windows.append(current)
+                    timestamps.append(currentFirstTs)
+                }
+                current.removeAll(keepingCapacity: true)
+            }
+            ctx.refresh(sensor, mergeChanges: false)
+        }
+
+        for loc in locations { ctx.refresh(loc, mergeChanges: false) }
+        return (windows, timestamps)
+    }
+
+    /// Recupera os episódios de uma sessão persistida: reconstrói as janelas do
+    /// disco, restaura o estado em memória (para os leitores `forSession:` e a
+    /// faixa de episódios funcionarem) e roda o pipeline compartilhado.
+    ///
+    /// `completion` é chamado na main queue ao terminar (sucesso ou falha), DEPOIS
+    /// dos publishes de `episodes`/`mlStatusMessage` — a UI usa isso para encerrar
+    /// o spinner sem depender de observar mudança em `episodes.count`.
+    func runClusteringFromStore(sessionId: UUID, t: Int = 8, completion: (() -> Void)? = nil) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else {
+                DispatchQueue.main.async { completion?() }
+                return
+            }
+
+            DispatchQueue.main.async {
+                self.mlStatusMessage = "Recuperando janelas do disco…"
+            }
+
+            let ctx = PersistenceController.shared.container.newBackgroundContext()
+            var rebuilt: (windows: [[Float]], timestamps: [Int64]) = ([], [])
+            ctx.performAndWait {
+                rebuilt = self.rebuildWindowsFromStore(sessionId: sessionId, ctx: ctx)
+            }
+
+            let W = rebuilt.timestamps.count
+            print("[RECOVERY] Sessão \(sessionId.uuidString.prefix(8))… → \(W) janelas reconstruídas")
+
+            guard W >= 2 else {
+                DispatchQueue.main.async {
+                    self.episodes = []
+                    self.clusterLabels = []
+                    self.linkageMatrix = []
+                    self.windowCount = W
+                    self.mlStatusMessage = "Janelas insuficientes (\(W)) nesta coleta"
+                    completion?()
+                }
+                return
+            }
+
+            // Restaura o estado em memória para que populateGroupSeries/
+            // gatherEpisodePoints(forSession:) e a UI de segmentação operem sobre
+            // esta sessão recuperada como se fosse a coleta corrente.
+            self.embeddingsLock.lock()
+            self.rawWindowsAccumulator = rebuilt.windows
+            self.windowTimestamps = rebuilt.timestamps
+            self.embeddingsLock.unlock()
+            self.lastSessionId = sessionId
+            DispatchQueue.main.async { self.windowCount = W }
+
+            // clusterRawWindows roda síncrono nesta fila; seus publishes vão para
+            // a main queue. Enfileirar `completion` na main DEPOIS garante que ele
+            // execute após o publish final de `episodes`.
+            self.clusterRawWindows(rebuilt.windows, timestamps: rebuilt.timestamps, t: t)
+            DispatchQueue.main.async { completion?() }
         }
     }
 
     // MARK: - Group series para o CombinedSensorsChartView
     //
-    // PARIDADE COM PYTHON (`show_sensors_plotly`):
-    // - Cada grupo é uma média dos canais (acc_x+acc_y+acc_z)/3, etc.
+    // PARIDADE COM PYTHON (`show_sensors_plotly` chamado com normalization="standard"):
+    // - Grupos de visualização do run_local.py: acc=[acc_x,acc_y,acc_z],
+    //   gyro=[gyro_x,gyro_y,gyro_z], GPS=[latitude,longitude].
+    // - O script PADRONIZA cada canal antes de mediar: `feats =
+    //   normalize_features(features, "standard")` faz z = (x-μ)/σ por canal sobre
+    //   a sessão inteira, e então `avg = feats[:, idx].mean(axis=1)` media os
+    //   canais do grupo. Reproduzimos EXATAMENTE isso (ver z-score nos passes
+    //   abaixo), de modo que acc/gyro/GPS do app coincidem com a referência em
+    //   ESCALA e FORMA — fechando o "ainda parece diferente"/"escalas bem
+    //   diferentes" da revisão. (Plotar a média CRUA — antiga abordagem — batia
+    //   só na tendência; o GPS em graus ~ -35 era o caso mais gritante.)
+    // - Gravação: usamos `userAcceleration×10` (gravidade já removida pela
+    //   CoreMotion); o CSV lido pelo Python usa o MESMO valor, então a entrada é
+    //   idêntica nas duas pontas — a única diferença anterior era a normalização.
     // - O eixo X é tempo absoluto convertido para Date (timezone-aware no display).
     // - Tudo na resolução amostral da SessionReading (20 Hz @ coleta), mas
     //   downsampled para um cap (`targetPlotPoints`) para manter a UI responsiva.
@@ -875,6 +1102,54 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
         return await withCheckedContinuation { continuation in
             let ctx = PersistenceController.shared.container.newBackgroundContext()
             ctx.perform {
+                // ===== Passe 1: estatísticas por canal para o z-score "standard" =====
+                // PARIDADE COM run_local.py: a visualização é gerada com
+                // normalization="standard", então normalize_features() padroniza CADA
+                // canal — z = (x - média)/desvio, sobre a sessão inteira — ANTES de
+                // mediar os canais do grupo (avg = feats[:, idx].mean(axis=1)).
+                // Reproduzimos isso aqui para que as curvas do app coincidam com as
+                // do pipeline de referência em ESCALA e FORMA, não só na tendência.
+                // (Antes plotávamos a média CRUA: batia na tendência mas divergia em
+                // escala/forma — origem do "ainda parece diferente" da revisão.)
+                let statsReq: NSFetchRequest<SensorReading> = SensorReading.fetchRequest()
+                statsReq.predicate = NSPredicate(format: "sessionId == %@", sessionId as CVarArg)
+                statsReq.sortDescriptors = [NSSortDescriptor(key: "timestamp", ascending: true)]
+                statsReq.returnsObjectsAsFaults = false
+                statsReq.fetchBatchSize = 1000
+
+                guard let statsReadings = try? ctx.fetch(statsReq), !statsReadings.isEmpty else {
+                    continuation.resume(returning: [])
+                    return
+                }
+                let N = statsReadings.count
+
+                // Ordem dos canais: 0=ax 1=ay 2=az 3=gx 4=gy 5=gz.
+                var sum = [Double](repeating: 0, count: 6)
+                var sumSq = [Double](repeating: 0, count: 6)
+                for r in statsReadings {
+                    let arr = [Double(r.ax), Double(r.ay), Double(r.az),
+                               Double(r.gx), Double(r.gy), Double(r.gz)]
+                    for c in 0..<6 { sum[c] += arr[c]; sumSq[c] += arr[c] * arr[c] }
+                    ctx.refresh(r, mergeChanges: false)
+                }
+                let nd = Double(N)
+                var mean = [Double](repeating: 0, count: 6)
+                var std  = [Double](repeating: 1, count: 6)
+                for c in 0..<6 {
+                    mean[c] = sum[c] / nd
+                    // Variância populacional (ddof=0), igual ao np.std padrão.
+                    let varc = max(0.0, sumSq[c] / nd - mean[c] * mean[c])
+                    let s = varc.squareRoot()
+                    std[c] = (s == 0) ? 1.0 : s   // canal constante → evita div/0 (== np: sd[sd==0]=1)
+                }
+                func zAcc(_ ax: Double, _ ay: Double, _ az: Double) -> Double {
+                    ((ax - mean[0]) / std[0] + (ay - mean[1]) / std[1] + (az - mean[2]) / std[2]) / 3.0
+                }
+                func zGyro(_ gx: Double, _ gy: Double, _ gz: Double) -> Double {
+                    ((gx - mean[3]) / std[3] + (gy - mean[4]) / std[4] + (gz - mean[5]) / std[5]) / 3.0
+                }
+
+                // ===== Passe 2: séries z-scored + downsample =====
                 let req: NSFetchRequest<SensorReading> = SensorReading.fetchRequest()
                 req.predicate = NSPredicate(format: "sessionId == %@", sessionId as CVarArg)
                 req.sortDescriptors = [NSSortDescriptor(key: "timestamp", ascending: true)]
@@ -886,10 +1161,11 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
                     return
                 }
 
-                let N = readings.count
                 let target = self.targetPlotPoints
                 // Downsample por janela fixa de média. Para coletas curtas
-                // (N <= target), window = 1 → vira identidade.
+                // (N <= target), window = 1 → vira identidade. A média de janela
+                // é linear, então comuta com o z-score (afim por canal) e com a
+                // média entre canais — a ordem aqui não altera o resultado.
                 let window = max(1, N / target)
 
                 var accSamples: [SensorGroupSample] = []
@@ -906,8 +1182,10 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
                     let k = end - i
                     for j in i..<end {
                         let r = readings[j]
-                        accSum += Double(r.ax + r.ay + r.az) / 3.0
-                        gyroSum += Double(r.gx + r.gy + r.gz) / 3.0
+                        // Média dos 3 eixos JÁ Z-SCORED — paridade com run_local.py:
+                        // feats = normalize_features(..., "standard"); avg = feats[:, idx].mean(1).
+                        accSum  += zAcc(Double(r.ax), Double(r.ay), Double(r.az))
+                        gyroSum += zGyro(Double(r.gx), Double(r.gy), Double(r.gz))
                         tsSum += Double(r.timestamp)
                         // Libera fault — não precisamos manter o objeto carregado.
                         ctx.refresh(r, mergeChanges: false)
@@ -924,15 +1202,104 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
                     i = end
                 }
 
-                let series: [SensorGroupSeries] = [
+                // GPS: série "GPS" lida de LocationEntity (1 Hz).
+                //
+                // PARIDADE COM run_local.py (`show_sensors_plotly`): o grupo de GPS
+                // usado no script é `[latitude, longitude]` sob normalization="standard",
+                // então cada eixo é padronizado (z-score) e em seguida mediado:
+                // `feats[:, idx_list].mean(axis=1)`. Por isso plotamos a média dos
+                // DOIS canais JÁ Z-SCORED — não mais a média em graus (~ -35), que
+                // diferia em escala/forma da referência.
+                let gpsSamples = self.makeGPSSamples(forSession: sessionId,
+                                                     ctx: ctx,
+                                                     target: target)
+
+                var series: [SensorGroupSeries] = [
                     SensorGroupSeries(name: "Accelerometer", samples: accSamples),
                     SensorGroupSeries(name: "Gyroscope",     samples: gyroSamples),
                 ]
-                print("[GROUPSERIES] Pronto: \(accSamples.count) pontos por grupo "
-                      + "(window=\(window), N=\(N))")
+                if !gpsSamples.isEmpty {
+                    series.append(SensorGroupSeries(name: "GPS", samples: gpsSamples))
+                }
+                print("[GROUPSERIES] Pronto: \(accSamples.count) pontos acc/gyro, "
+                      + "\(gpsSamples.count) pontos GPS (window=\(window), N=\(N))")
                 continuation.resume(returning: series)
             }
         }
+    }
+
+    /// Constrói a série "GPS" da sessão a partir de LocationEntity (1 Hz).
+    ///
+    /// PARIDADE COM run_local.py: o grupo de GPS do `show_sensors_plotly` é
+    /// `[latitude, longitude]` sob normalization="standard". `normalize_features`
+    /// padroniza cada eixo (z-score sobre a sessão) e `feats[:, idx].mean(axis=1)`
+    /// devolve a MÉDIA dos dois canais já normalizados. Por isso o valor plotado é
+    /// ((lat-μ_lat)/σ_lat + (lon-μ_lon)/σ_lon)/2 por amostra — não mais (lat+lon)/2
+    /// em graus. Downsample por média de janela espelha o mesmo cap de pontos
+    /// (`targetPlotPoints`) usado para acc/gyro. Roda no MESMO `ctx`/`perform`
+    /// do chamador (não cria continuation própria) — só uma 2ª fetch.
+    ///
+    /// Retorna `[]` se a sessão não tem GPS (ex.: coleta indoor sem fix), caso em
+    /// que o CombinedSensorsChartView simplesmente não desenha o painel de GPS.
+    private func makeGPSSamples(forSession sessionId: UUID,
+                                ctx: NSManagedObjectContext,
+                                target: Int) -> [SensorGroupSample] {
+        let req: NSFetchRequest<LocationEntity> = LocationEntity.fetchRequest()
+        req.predicate = NSPredicate(format: "sessionId == %@", sessionId as CVarArg)
+        req.sortDescriptors = [NSSortDescriptor(key: "timestamp", ascending: true)]
+        req.returnsObjectsAsFaults = false
+        req.fetchBatchSize = 1000
+
+        guard let locs = try? ctx.fetch(req), !locs.isEmpty else { return [] }
+
+        let N = locs.count
+
+        // Estatísticas por eixo (latitude, longitude) para o z-score "standard",
+        // espelhando normalize_features(..., "standard") do run_local.py: cada eixo
+        // é padronizado ANTES da média. É isso que faz a curva de GPS do app
+        // coincidir com a do pipeline de referência em escala E forma (antes
+        // plotávamos a média em graus ~ -35, origem da "escala bem diferente").
+        // locs é 1 Hz (poucos milhares de pontos) → cabe em memória num passe.
+        var sLat = 0.0, sLon = 0.0, sqLat = 0.0, sqLon = 0.0
+        for l in locs {
+            let la = Double(l.latitude), lo = Double(l.longitude)
+            sLat += la; sLon += lo; sqLat += la * la; sqLon += lo * lo
+        }
+        let nd = Double(N)
+        let mLat = sLat / nd, mLon = sLon / nd
+        let rawLat = max(0.0, sqLat / nd - mLat * mLat).squareRoot()
+        let rawLon = max(0.0, sqLon / nd - mLon * mLon).squareRoot()
+        let dLat = rawLat == 0 ? 1.0 : rawLat   // eixo constante → evita div/0
+        let dLon = rawLon == 0 ? 1.0 : rawLon
+
+        let window = max(1, N / target)
+        var samples: [SensorGroupSample] = []
+        samples.reserveCapacity(N / window + 1)
+
+        var i = 0
+        while i < N {
+            let end = min(N, i + window)
+            var gpsSum: Double = 0
+            var tsSum: Double = 0
+            let k = end - i
+            for j in i..<end {
+                let l = locs[j]
+                // Média ((lat-μ)/σ + (lon-μ)/σ)/2 — z-score por eixo + média, paridade
+                // com viz_groups=[latitude, longitude] sob normalization="standard".
+                let zla = (Double(l.latitude) - mLat) / dLat
+                let zlo = (Double(l.longitude) - mLon) / dLon
+                gpsSum += (zla + zlo) / 2.0
+                tsSum += Double(l.timestamp)
+                ctx.refresh(l, mergeChanges: false)
+            }
+            let kd = Double(k)
+            let date = Date(timeIntervalSince1970: (tsSum / kd) / 1000.0)
+            samples.append(SensorGroupSample(timestamp: date,
+                                             value: gpsSum / kd,
+                                             group: "GPS"))
+            i = end
+        }
+        return samples
     }
 
     // MARK: - GPS points by episode (alimenta EpisodesMapView)
@@ -971,6 +1338,7 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
                 var pts: [EpisodePoint] = []
                 pts.reserveCapacity(locs.count)
                 var epIdx = 0
+                let lastIdx = sortedEps.count - 1
 
                 for loc in locs {
                     let ts = loc.timestamp
@@ -978,7 +1346,17 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
                     while epIdx < sortedEps.count && sortedEps[epIdx].endMs < ts {
                         epIdx += 1
                     }
-                    guard epIdx < sortedEps.count else { break }
+                    // FIX (1.1 — sincronizar com os dados): o `endMs` do ÚLTIMO
+                    // episódio é o ts do PRIMEIRO sample da última janela, não o
+                    // fim dela. Logo os ~15 s finais de GPS têm ts > endMs e o
+                    // loop acima estourava `epIdx` além do fim — esses pontos
+                    // eram silenciosamente descartados (`break`), deixando o
+                    // último grupo sub-renderizado no mapa. Como os pontos estão
+                    // ordenados por tempo, qualquer ponto além da última fronteira
+                    // pertence ao último episódio: fixamos epIdx no último em vez
+                    // de abandonar o loop.
+                    if epIdx > lastIdx { epIdx = lastIdx }
+                    guard epIdx >= 0 else { break }
                     let ep = sortedEps[epIdx]
                     guard ts >= ep.startMs else {
                         // Buraco entre episódios — pular este ponto.
@@ -1206,6 +1584,191 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
         return fileURL
     }
 
+    // MARK: - Import de CSV (upload de coletas externas)
+    //
+    // Permite carregar um CSV no MESMO formato que `exportSession` gera (de outro
+    // device, backup, ou de uma coleta exportada antes do app ser reinstalado) e
+    // re-hidratá-lo como uma sessão persistida. A partir daí, todo o fluxo de
+    // recovery (computar episódios, mapa, gráfico, re-exportar) funciona igual a
+    // uma coleta nativa, porque os dados acabam nas MESMAS entidades Core Data.
+
+    /// Erros de validação/processamento de um upload de CSV. `LocalizedError`
+    /// para a UI exibir mensagens claras em pt-BR.
+    enum SessionImportError: LocalizedError {
+        case unreadable
+        case empty
+        case badHeader
+        case noValidRows
+
+        var errorDescription: String? {
+            switch self {
+            case .unreadable:
+                return "Não foi possível ler o arquivo. Verifique se é um CSV de texto válido."
+            case .empty:
+                return "O arquivo está vazio."
+            case .badHeader:
+                return "O cabeçalho do CSV não bate com o formato esperado "
+                     + "(timestamp, acc_x, …, vertical_accuracy)."
+            case .noValidRows:
+                return "Nenhuma linha de dados válida foi encontrada no arquivo."
+            }
+        }
+    }
+
+    /// Importa um CSV (formato de `exportSession`) como uma NOVA sessão persistida.
+    /// Roda fora da main thread; valida cabeçalho/linhas, insere em lotes no Core
+    /// Data e retorna o `SessionSummary` resultante para a UI navegar/atualizar.
+    func importSession(from sourceURL: URL) async throws -> SessionSummary {
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let self = self else {
+                    continuation.resume(throwing: SessionImportError.unreadable)
+                    return
+                }
+                do {
+                    let summary = try self.performImport(from: sourceURL)
+                    continuation.resume(returning: summary)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    /// Trabalho síncrono do import (parse + inserts em lote). Chamado de uma fila
+    /// background por `importSession`.
+    private func performImport(from sourceURL: URL) throws -> SessionSummary {
+        // Arquivos vindos do file picker chegam fora do sandbox → precisam de
+        // acesso security-scoped enquanto lemos.
+        let scoped = sourceURL.startAccessingSecurityScopedResource()
+        defer { if scoped { sourceURL.stopAccessingSecurityScopedResource() } }
+
+        let raw: String
+        do {
+            raw = try String(contentsOf: sourceURL, encoding: .utf8)
+        } catch {
+            // Fallback p/ encodings legados (ex.: latin1) antes de desistir.
+            guard let data = try? Data(contentsOf: sourceURL),
+                  let decoded = String(data: data, encoding: .isoLatin1) else {
+                throw SessionImportError.unreadable
+            }
+            raw = decoded
+        }
+
+        // Quebra por qualquer newline (\n ou \r\n) e descarta linhas em branco.
+        let lines = raw.split(whereSeparator: \.isNewline)
+        guard !lines.isEmpty else { throw SessionImportError.empty }
+
+        // Detecta cabeçalho: se a 1ª coluna não é um inteiro, é header.
+        var startIndex = 0
+        let firstCols = lines[0].split(separator: ",", omittingEmptySubsequences: false)
+        if let firstField = firstCols.first,
+           Int64(firstField.trimmingCharacters(in: .whitespaces)) == nil {
+            // É um cabeçalho — valida minimamente (timestamp + ≥ 7 colunas).
+            guard firstCols.count >= 7,
+                  firstField.lowercased().contains("timestamp") else {
+                throw SessionImportError.badHeader
+            }
+            startIndex = 1
+        }
+
+        let sessionId = UUID()
+        let ctx = PersistenceController.shared.container.newBackgroundContext()
+
+        var totalRows = 0
+        var gpsRows = 0
+        var minTs = Int64.max
+        var maxTs = Int64.min
+
+        // Dedup de GPS: o CSV forward-filla o último fix em cada amostra (20 Hz);
+        // só criamos uma LocationEntity quando lat/lon/alt mudam, recuperando a
+        // cadência original (~1 Hz) em vez de duplicar centenas de milhares de linhas.
+        var lastLat: Float = .nan
+        var lastLon: Float = .nan
+        var lastAlt: Float = .nan
+
+        let saveEvery = 2000
+        var pending = 0
+
+        ctx.performAndWait {
+            for i in startIndex..<lines.count {
+                let cols = lines[i].split(separator: ",", omittingEmptySubsequences: false)
+                guard cols.count >= 7,
+                      let ts = Int64(cols[0].trimmingCharacters(in: .whitespaces)),
+                      let ax = Float(cols[1].trimmingCharacters(in: .whitespaces)),
+                      let ay = Float(cols[2].trimmingCharacters(in: .whitespaces)),
+                      let az = Float(cols[3].trimmingCharacters(in: .whitespaces)),
+                      let gx = Float(cols[4].trimmingCharacters(in: .whitespaces)),
+                      let gy = Float(cols[5].trimmingCharacters(in: .whitespaces)),
+                      let gz = Float(cols[6].trimmingCharacters(in: .whitespaces))
+                else { continue }   // linha malformada → ignora
+
+                let reading = SensorReading(context: ctx)
+                reading.id = UUID()
+                reading.sessionId = sessionId
+                reading.timestamp = ts
+                reading.ax = ax; reading.ay = ay; reading.az = az
+                reading.gx = gx; reading.gy = gy; reading.gz = gz
+                reading.battery = 0
+
+                if ts < minTs { minTs = ts }
+                if ts > maxTs { maxTs = ts }
+                totalRows += 1
+                pending += 1
+
+                // GPS opcional (campos 7..11). Só com lat+lon presentes/parseáveis.
+                if cols.count >= 9,
+                   let lat = Float(cols[7].trimmingCharacters(in: .whitespaces)),
+                   let lon = Float(cols[8].trimmingCharacters(in: .whitespaces)) {
+                    let alt = cols.count > 9 ? (Float(cols[9].trimmingCharacters(in: .whitespaces)) ?? 0) : 0
+                    let hAcc = cols.count > 10 ? (Float(cols[10].trimmingCharacters(in: .whitespaces)) ?? 0) : 0
+                    let vAcc = cols.count > 11 ? (Float(cols[11].trimmingCharacters(in: .whitespaces)) ?? 0) : 0
+
+                    if lat != lastLat || lon != lastLon || alt != lastAlt {
+                        let loc = LocationEntity(context: ctx)
+                        loc.sessionId = sessionId
+                        loc.timestamp = ts
+                        loc.latitude = lat
+                        loc.longitude = lon
+                        loc.altitude = alt
+                        loc.horizontalAccuracy = hAcc
+                        loc.verticalAccuracy = vAcc
+                        lastLat = lat; lastLon = lon; lastAlt = alt
+                        gpsRows += 1
+                        pending += 1
+                    }
+                }
+
+                if pending >= saveEvery {
+                    do {
+                        try ctx.save()
+                        ctx.reset()   // libera row cache → memória O(batch)
+                        pending = 0
+                    } catch {
+                        print("❌ [CSV Import] Save de lote falhou: \(error.localizedDescription)")
+                    }
+                }
+            }
+
+            if ctx.hasChanges {
+                do { try ctx.save() }
+                catch { print("❌ [CSV Import] Save final falhou: \(error.localizedDescription)") }
+            }
+        }
+
+        guard totalRows > 0 else { throw SessionImportError.noValidRows }
+
+        print("✅ [CSV Import] sessão \(sessionId.uuidString): \(totalRows) amostras, \(gpsRows) fixes GPS")
+
+        return SessionSummary(
+            id: sessionId,
+            startMs: minTs,
+            endMs: maxTs,
+            rowCount: totalRows,
+            isExported: false
+        )
+    }
+
     // MARK: - Recovery (Etapa D)
 
     /// Retorna sessionIds presentes em SensorReading que NÃO estão marcadas
@@ -1259,6 +1822,75 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
         }
 
         return Array(filteredOrphans).sorted { $0.uuidString < $1.uuidString }
+    }
+
+    /// Resumo de uma sessão persistida, para a UI de recuperação.
+    struct SessionSummary: Identifiable, Hashable {
+        let id: UUID
+        let startMs: Int64
+        let endMs: Int64
+        let rowCount: Int
+        let isExported: Bool
+
+        var startDate: Date { Date(timeIntervalSince1970: Double(startMs) / 1000) }
+        var endDate: Date { Date(timeIntervalSince1970: Double(endMs) / 1000) }
+        var durationSec: Double { Double(endMs - startMs) / 1000 }
+    }
+
+    /// Lista TODAS as sessões persistidas em SensorReading (não só as órfãs),
+    /// com intervalo de tempo, nº de amostras e flag de exportada — para a tela
+    /// de recuperação. Exclui a sessão ATIVA (sendo populada agora). Ordenado do
+    /// mais recente para o mais antigo.
+    func allPersistedSessions() -> [SessionSummary] {
+        let ctx = PersistenceController.shared.container.newBackgroundContext()
+        var summaries: [SessionSummary] = []
+
+        ctx.performAndWait {
+            // SELECT DISTINCT sessionId — barato (traduz para DISTINCT no SQLite).
+            let distinctReq = NSFetchRequest<NSDictionary>(entityName: "SensorReading")
+            distinctReq.resultType = .dictionaryResultType
+            distinctReq.returnsDistinctResults = true
+            distinctReq.propertiesToFetch = ["sessionId"]
+            distinctReq.predicate = NSPredicate(format: "sessionId != nil")
+
+            let rows = (try? ctx.fetch(distinctReq)) ?? []
+            let exported = exportedStore.allExported()
+            let active = currentSessionId
+
+            for row in rows {
+                guard let id = row["sessionId"] as? UUID, id != active else { continue }
+
+                // min/max timestamp + count por sessão. Usamos um fetch de
+                // agregação leve via dictionary + expressões.
+                let aggReq = NSFetchRequest<NSDictionary>(entityName: "SensorReading")
+                aggReq.resultType = .dictionaryResultType
+                aggReq.predicate = NSPredicate(format: "sessionId == %@", id as CVarArg)
+
+                let tsKey = NSExpression(forKeyPath: "timestamp")
+                let minExpr = NSExpressionDescription()
+                minExpr.name = "minTs"; minExpr.expression = NSExpression(forFunction: "min:", arguments: [tsKey]); minExpr.expressionResultType = .integer64AttributeType
+                let maxExpr = NSExpressionDescription()
+                maxExpr.name = "maxTs"; maxExpr.expression = NSExpression(forFunction: "max:", arguments: [tsKey]); maxExpr.expressionResultType = .integer64AttributeType
+                let countExpr = NSExpressionDescription()
+                countExpr.name = "cnt"; countExpr.expression = NSExpression(forFunction: "count:", arguments: [tsKey]); countExpr.expressionResultType = .integer64AttributeType
+                aggReq.propertiesToFetch = [minExpr, maxExpr, countExpr]
+
+                guard let agg = (try? ctx.fetch(aggReq))?.first,
+                      let minTs = (agg["minTs"] as? NSNumber)?.int64Value,
+                      let maxTs = (agg["maxTs"] as? NSNumber)?.int64Value,
+                      let cnt = (agg["cnt"] as? NSNumber)?.intValue else { continue }
+
+                summaries.append(SessionSummary(
+                    id: id,
+                    startMs: minTs,
+                    endMs: maxTs,
+                    rowCount: cnt,
+                    isExported: exported.contains(id)
+                ))
+            }
+        }
+
+        return summaries.sorted { $0.startMs > $1.startMs }
     }
 
     /// Conveniência para chamada no launch: roda findOrphanedSessions e
@@ -1341,3 +1973,4 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
         }
     }
 }
+
