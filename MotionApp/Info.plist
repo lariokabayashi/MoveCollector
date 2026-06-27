@@ -2,26 +2,31 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>UISupportsDocumentBrowser</key>
-	<true/>
-	<key>UIFileSharingEnabled</key>
-	<true/>
-	<key>LSSupportsOpeningDocumentsInPlace</key>
-	<true/>
-	<key>BGTaskSchedulerPermittedIdentifiers</key>
-	<array>
-		<string>com.LarissaOkabayashi.MoveCollector.task.process</string>
-	</array>
-	<key>UIBackgroundModes</key>
-	<array>
-		<string>processing</string>
-		<string>fetch</string>
-		<string>location</string>
-		<string>remote-notification</string>
-	</array>
-	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>We use your location to collect data continuously, even in the background.</string>
-	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-	<string>We use your location to collect data continuously, even in the background.</string>
+    <key>UISupportsDocumentBrowser</key>
+    <true/>
+    <key>UIFileSharingEnabled</key>
+    <true/>
+    <key>LSSupportsOpeningDocumentsInPlace</key>
+    <true/>
+    <key>BGTaskSchedulerPermittedIdentifiers</key>
+    <array>
+        <string>com.LarissaOkabayashi.MoveCollector.task.process</string>
+    </array>
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>processing</string>
+        <string>fetch</string>
+        <string>location</string>
+        <string>remote-notification</string>
+    </array>
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>We use your location to collect data continuously, even in the background.</string>
+    <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+    <string>We use your location to collect data continuously, even in the background.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Usamos o microfone para você gravar uma nota de voz e rotular cada episódio de movimento.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Transcrevemos sua nota de voz no dispositivo para sugerir automaticamente o rótulo do episódio.</string>
 </dict>
 </plist>
+

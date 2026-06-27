@@ -28,6 +28,36 @@ struct AppConstants{
     let windowSize = 300               // 15 sec @ 20 Hz (matches TFC_Backbone input)
     let stepSize = 300                 // sem overlap (idêntico ao Python step_size = window_size)
     let nChannels = 11                 // 11 features: acc xyz + gyro xyz + lat + lon + alt + hAcc + vAcc
+
+    // MARK: - Warm-up phase (window accumulation)
+    //
+    // CRITICAL — NÃO REMOVER sem entender o motivo (ver SensorManagerViewModel.appendWindowSample):
+    //
+    // A PRIMEIRA janela de ~15 s coletada logo após o usuário tocar em "Iniciar
+    // coleta" contém artefatos transientes que NÃO se repetem no resto da sessão:
+    //   1. O toque físico no botão Start gera atividade de acc/gyro que a CoreMotion
+    //      captura imediatamente após o início da coleta.
+    //   2. O `CMMotionManager` precisa de ~1–2 s após `startDeviceMotionUpdates()`
+    //      para estabilizar (offsets/calibração transitórios nos primeiros samples).
+    //   3. O GPS costuma re-estabilizar a acurácia (hAcc) nessa primeira janela.
+    //   4. O usuário tipicamente toca em Start e DEPOIS guarda o telefone no bolso,
+    //      braçadeira, suporte de bike etc. — esse movimento é fundamentalmente
+    //      diferente da atividade medida em seguida.
+    //
+    // Como o backbone TFC foi treinado em movimento contínuo, essa primeira janela
+    // vira uma assinatura latente distinta e o clustering hierárquico (Ward) a isola
+    // como cluster singleton. Matematicamente correto, mas indesejável: representa
+    // ruído de startup, não comportamento do usuário — e diverge do notebook Python.
+    //
+    // Solução: descartar as primeiras `warmupWindowCount` janelas COMPLETAS antes de
+    // começar a acumular em `rawWindowsAccumulator`. As janelas descartadas ainda são
+    // contadas para o bookkeeping de warm-up (mas não são armazenadas).
+    //
+    // Trade-off: perde-se ~15 s × warmupWindowCount de dado real no início. Aceitável
+    // para sessões típicas (~1,5 h) onde os transientes de startup não são relevantes.
+    //
+    // Ajuste fino: aumente para descartar mais startup; 0 desativa o warm-up.
+    let warmupWindowCount = 1          // nº de janelas iniciais ignoradas (default = 1 ≈ 15 s)
     //
     // ETAPA F (TFC particionado): 3 backbones (Acc, Gyro, GPS) cada um produzindo
     // 256d (concat z_t + z_f). Final = concat das 3 partições = 768d.
@@ -51,3 +81,4 @@ struct AppConstants{
     var sensorFrequencyHz: Double { 1.0 / sensorUpdateInterval }  // 20 Hz
     var gpsFrequencyHz: Double { 1.0 / gpsUpdateInterval }        // 1 Hz
 }
+

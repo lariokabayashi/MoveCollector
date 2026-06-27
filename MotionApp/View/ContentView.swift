@@ -7,7 +7,12 @@ import UniformTypeIdentifiers
 struct ContentView: View {
     @ObservedObject var sensorManager: SensorManagerViewModel
     @Environment(\.managedObjectContext) private var context
+    @StateObject private var labelStore = EpisodeLabelStore()
     @State private var isUserStopped = false
+
+    /// Onboarding "How to use this app" — exibido só no primeiro uso.
+    @AppStorage("hasSeenOnboarding") private var hasSeenOnboarding = false
+    @State private var showOnboarding = false
     @State private var csvURL: URL?
     @State private var combinedCSVURL: URL?  // Novo: URL para CSV combinado
     @State private var startTime = Date()
@@ -17,6 +22,12 @@ struct ContentView: View {
     // Default K = 10. O Stepper em SegmentationCardView clampa automaticamente
     // ao range válido [2, min(W, 30)] sempre que `windowCount` mudar.
     @State private var targetEpisodes = 10
+
+    /// Painel de benchmarks (avaliação de performance da tese).
+    @State private var showBenchmarks = false
+
+    /// Tela de recuperação de coletas persistidas (ex.: após BGTask terminado).
+    @State private var showRecovery = false
     
     var body: some View {
         NavigationStack {
@@ -40,6 +51,7 @@ struct ContentView: View {
                     
                     // Clustering
                     SegmentationCardView(sensorManager: sensorManager,
+                                         labelStore: labelStore,
                                          targetEpisodes: $targetEpisodes)
                     
                     // Actions
@@ -79,6 +91,52 @@ struct ContentView: View {
                 .padding()
             }
             .navigationTitle("Move Collector")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        showOnboarding = true
+                    } label: {
+                        Image(systemName: "questionmark.circle")
+                    }
+                    .accessibilityIdentifier("OpenOnboardingButton")
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        showBenchmarks = true
+                    } label: {
+                        Image(systemName: "stopwatch")
+                    }
+                    .accessibilityIdentifier("OpenBenchmarksButton")
+                }
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        showRecovery = true
+                    } label: {
+                        Image(systemName: "tray.and.arrow.down")
+                    }
+                    .accessibilityIdentifier("OpenRecoveryButton")
+                }
+            }
+//            .sheet(isPresented: $showBenchmarks) {
+//                BenchmarkView(sensorManager: sensorManager)
+//            }
+            .sheet(isPresented: $showRecovery) {
+                RecoverySessionsView(sensorManager: sensorManager)
+            }
+            .fullScreenCover(isPresented: $showOnboarding) {
+                OnboardingView {
+                    hasSeenOnboarding = true
+                    showOnboarding = false
+                }
+            }
+            .onAppear {
+                // Em UI tests pulamos o onboarding (passam "-skipOnboarding")
+                // para não bloquear a tela principal.
+                let skipForTests = ProcessInfo.processInfo.arguments.contains("-skipOnboarding")
+                if !hasSeenOnboarding && !skipForTests {
+                    showOnboarding = true
+                }
+            }
         }
     }
 }
@@ -92,4 +150,5 @@ struct ContentView: View {
         // Fallback on earlier versions
     }
 }
+
 
