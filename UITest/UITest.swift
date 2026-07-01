@@ -13,25 +13,51 @@ struct AccessibilityIdentifiers {
     static let durationTimerLabel = "DurationTimerLabel"
 }
 
+/// Labels reais do botão (UI em português). O estado deriva de
+/// `sensorManager.isRecording`: "Iniciar coleta" quando parado, "Parar coleta"
+/// quando gravando.
+private enum ButtonLabel {
+    static let start = "Iniciar coleta"
+    static let stop = "Parar coleta"
+}
+
 final class SensorDataUITests: XCTestCase {
     
     var app: XCUIApplication!
     
     override func setUpWithError() throws {
-        // Put setup code here. This method is called before the invocation of each test method in the class.
-        
         // In UI tests it is usually best to stop immediately when a failure occurs.
         continueAfterFailure = false
         
         app = XCUIApplication()
+        app.launchArguments += ["-skipOnboarding"]
         app.launch()
     }
     
     override func tearDownWithError() throws {
-        // Put teardown code here. This method is called after the invocation of each test method in the class.
         app = nil
     }
-    
+
+    // MARK: - Helpers
+
+    /// Espera o `label` de um elemento ficar igual a `expected`. Necessário porque
+    /// o botão só troca quando a BGTask realmente sobe (isRecording vira true),
+    /// o que pode ter uma pequena latência após o toque.
+    @discardableResult
+    private func waitForLabel(_ element: XCUIElement,
+                              toEqual expected: String,
+                              timeout: TimeInterval = 5.0) -> Bool {
+        let predicate = NSPredicate(format: "label == %@", expected)
+        let exp = XCTNSPredicateExpectation(predicate: predicate, object: element)
+        return XCTWaiter().wait(for: [exp], timeout: timeout) == .completed
+    }
+
+    private func sleep(_ seconds: TimeInterval) {
+        let exp = XCTestExpectation(description: "sleep \(seconds)s")
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { exp.fulfill() }
+        wait(for: [exp], timeout: seconds + 1.0)
+    }
+
     // MARK: - Core UI Functionality Tests
     
     func testStartStopAndDataDisplay() throws {
@@ -39,44 +65,33 @@ final class SensorDataUITests: XCTestCase {
         let accelXLabel = app.staticTexts[AccessibilityIdentifiers.accelXLabel]
         let durationTimerLabel = app.staticTexts[AccessibilityIdentifiers.durationTimerLabel]
         
-        // 1. Initial State Check (Assuming the app starts in a stopped state)
-        XCTAssertTrue(startStopButton.exists, "Start/Stop button must exist")
-        XCTAssertEqual(startStopButton.label, "Stop", "Button label should be 'Stop' initially")
+        // 1. Estado inicial: app NÃO inicia coleta sozinho no launch.
+        XCTAssertTrue(startStopButton.waitForExistence(timeout: 5.0), "Start/Stop button must exist")
+        XCTAssertEqual(startStopButton.label, ButtonLabel.start, "Button should start in stopped state")
         
-        // 2. Start Collection
+        // 2. Inicia a coleta.
         startStopButton.tap()
-        XCTAssertEqual(startStopButton.label, "Start", "Button label should change to 'Start' after tapping")
+        XCTAssertTrue(waitForLabel(startStopButton, toEqual: ButtonLabel.stop),
+                      "Button label should change to '\(ButtonLabel.stop)' once collection starts")
         
-        // 3. Verify Data Display is Updating
-        // Get the initial value of the Accelerometer X label
+        // 3. Verifica que os dados de sensor estão atualizando.
         let initialAccelXValue = accelXLabel.label
-        
-        // Wait for a short period to allow sensor data to update
-        let expectation = XCTestExpectation(description: "Wait for sensor data to update")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-            expectation.fulfill()
-        }
-        wait(for: [expectation], timeout: 3.0)
-        
-        // Get the new value and assert it has changed (or is a valid number format)
+        sleep(2.0)
         let newAccelXValue = accelXLabel.label
         XCTAssertNotEqual(initialAccelXValue, newAccelXValue, "Sensor data label should update after collection starts")
         
-        // Verify the timer is running (i.e., not "00:00:00")
-        XCTAssertNotEqual(durationTimerLabel.label, "00:00:00", "Duration timer should be running")
+        // 4. Verifica que o contador de duração está correndo (≠ "0.00 s").
+        XCTAssertNotEqual(durationTimerLabel.label, "0.00 s", "Duration timer should be running")
         
-        // 4. Stop Collection
+        // 5. Para a coleta.
         startStopButton.tap()
-        XCTAssertEqual(startStopButton.label, "Start", "Button label should change back to 'Start'")
+        XCTAssertTrue(waitForLabel(startStopButton, toEqual: ButtonLabel.start),
+                      "Button label should change back to '\(ButtonLabel.start)'")
         
-        // Wait for a moment and check if the timer has stopped
+        // 6. Verifica que o contador congelou após parar.
         let finalTimerValue = durationTimerLabel.label
-        let stopExpectation = XCTestExpectation(description: "Wait for timer to stop")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            stopExpectation.fulfill()
-        }
-        wait(for: [stopExpectation], timeout: 2.0)
-        XCTAssertEqual(finalTimerValue, durationTimerLabel.label, "Duration timer should stop after collection stops")
+        sleep(1.0)
+        XCTAssertEqual(finalTimerValue, durationTimerLabel.label, "Duration timer should freeze after collection stops")
     }
 }
 
@@ -87,57 +102,51 @@ extension SensorDataUITests {
     func testFullDataCollectionAndExportFlow() throws {
         let startStopButton = app.buttons[AccessibilityIdentifiers.startStopButton]
         
-        // 1. Start Collection
+        // 1. Inicia a coleta.
         startStopButton.tap()
-        XCTAssertEqual(startStopButton.label, "Stop", "Pre-condition: Collection must be running")
+        XCTAssertTrue(waitForLabel(startStopButton, toEqual: ButtonLabel.stop),
+                      "Pre-condition: collection must be running")
         
-        // 2. Wait for a short period to ensure data is collected
-        let collectionTime: TimeInterval = 5.0
-        let collectionExpectation = XCTestExpectation(description: "Collect data for \(collectionTime) seconds")
-        DispatchQueue.main.asyncAfter(deadline: .now() + collectionTime) {
-            collectionExpectation.fulfill()
-        }
-        wait(for: [collectionExpectation], timeout: collectionTime + 1.0)
+        // 2. Coleta por alguns segundos.
+        sleep(5.0)
         
-        // 3. Stop Collection (This should trigger the CSV export and make the Export button visible)
+        // 3. Para a coleta (dispara o export do CSV e exibe o botão Exportar).
         startStopButton.tap()
-        XCTAssertEqual(startStopButton.label, "Start", "Collection must be stopped")
+        XCTAssertTrue(waitForLabel(startStopButton, toEqual: ButtonLabel.start),
+                      "Collection must be stopped")
     }
     
     func testBackgroundToForegroundTransition() throws {
         let startStopButton = app.buttons[AccessibilityIdentifiers.startStopButton]
         let durationTimerLabel = app.staticTexts[AccessibilityIdentifiers.durationTimerLabel]
         
-        // 1. Start Collection
+        // 1. Inicia a coleta.
         startStopButton.tap()
-        XCTAssertEqual(startStopButton.label, "Stop", "Pre-condition: Collection must be running")
+        XCTAssertTrue(waitForLabel(startStopButton, toEqual: ButtonLabel.stop),
+                      "Pre-condition: collection must be running")
         
-        // 2. Get initial timer value
+        // 2. Captura o valor inicial do contador.
         let initialTimerValue = durationTimerLabel.label
         
-        // 3. Simulate App Backgrounding (using the device home button)
+        // 3. Manda o app para background (botão home).
         XCUIDevice.shared.press(XCUIDevice.Button.home)
         
-        // 4. Wait in the background (Simulate long-running background task)
-        let backgroundTime: TimeInterval = 5.0
-        let backgroundExpectation = XCTestExpectation(description: "Wait in background for \(backgroundTime) seconds")
-        DispatchQueue.main.asyncAfter(deadline: .now() + backgroundTime) {
-            backgroundExpectation.fulfill()
-        }
-        wait(for: [backgroundExpectation], timeout: backgroundTime + 1.0)
+        // 4. Aguarda em background (simula tarefa longa).
+        sleep(5.0)
         
-        // 5. Simulate App Foregrounding (re-launching the app)
+        // 5. Traz o app de volta para foreground.
         app.activate()
         
-        // 6. Verify State is Maintained
-        // The button should still say "Stop"
-        XCTAssertEqual(startStopButton.label, "Stop", "Collection state should be maintained after returning from background")
+        // 6. O estado da coleta deve ser mantido.
+        XCTAssertEqual(startStopButton.label, ButtonLabel.stop,
+                       "Collection state should be maintained after returning from background")
         
-        // The timer value should have advanced significantly
+        // 7. O contador deve ter avançado.
         let finalTimerValue = durationTimerLabel.label
         XCTAssertNotEqual(initialTimerValue, finalTimerValue, "Timer value should have advanced after background period")
         
-        // Stop the collection for cleanup
+        // 8. Para a coleta (cleanup).
         startStopButton.tap()
     }
 }
+

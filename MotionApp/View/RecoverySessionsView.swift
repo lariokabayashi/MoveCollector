@@ -7,7 +7,7 @@
 //  no Core Data (SensorReading + LocationEntity). Esta tela lista todas as
 //  sessões persistidas e permite, para cada uma:
 //    - Exportar o CSV (exportSession).
-//    - Recomputar os episódios a partir do disco (runClusteringFromStore) —
+//    - Recomputar os episódios a partir do disco (clusterStoreDetached) —
 //      reconstrói as janelas e roda o mesmo pipeline da coleta ao vivo.
 //    - Abrir o mapa de episódios e o gráfico de sensores combinados.
 //    - Apagar a sessão.
@@ -216,6 +216,11 @@ struct RecoverySessionDetailView: View {
     @State private var showChart = false
     @State private var isLoadingViz = false
 
+    /// Episódios desta coleta de recuperação/upload — guardados LOCALMENTE, fora
+    /// do estado compartilhado do SensorManager. Assim a tela de upload não
+    /// sobrescreve a coleta atual da home (e vice-versa).
+    @State private var recoveredEpisodes: [Episode] = []
+
     private var maxK: Int {
         // 1 janela ≈ 15 s; estimativa de janelas a partir da duração.
         let approxWindows = max(2, Int(summary.durationSec / 15))
@@ -252,7 +257,7 @@ struct RecoverySessionDetailView: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 if episodesReady {
-                    Text("\(sensorManager.episodes.count) episódios prontos")
+                    Text("\(recoveredEpisodes.count) episódios prontos")
                         .font(.caption).foregroundStyle(.green)
                 }
             }
@@ -305,7 +310,7 @@ struct RecoverySessionDetailView: View {
         .sheet(isPresented: $showChart) {
             CombinedSensorsChartView(
                 groupSeries: groupSeries,
-                episodes: sensorManager.episodes,
+                episodes: recoveredEpisodes,
                 displayTimezone: TimeZone.current
             )
             .padding()
@@ -315,16 +320,18 @@ struct RecoverySessionDetailView: View {
     private func computeEpisodes() {
         isComputing = true
         episodesReady = false
-        sensorManager.runClusteringFromStore(sessionId: summary.id, t: targetEpisodes) {
+        sensorManager.clusterStoreDetached(sessionId: summary.id, t: targetEpisodes) { episodes, _ in
+            recoveredEpisodes = episodes
             isComputing = false
-            episodesReady = sensorManager.episodes.count > 0
+            episodesReady = !episodes.isEmpty
         }
     }
 
     private func openMap() {
         isLoadingViz = true
         Task {
-            let pts = await sensorManager.gatherEpisodePoints(forSession: summary.id)
+            let pts = await sensorManager.gatherEpisodePoints(
+                forSession: summary.id, episodes: recoveredEpisodes)
             await MainActor.run {
                 self.mapPoints = pts
                 self.isLoadingViz = false
@@ -368,4 +375,5 @@ enum RecoveryFormat {
         return "\(s)s"
     }
 }
+
 

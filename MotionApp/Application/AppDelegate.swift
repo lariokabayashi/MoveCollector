@@ -2,6 +2,7 @@ import UIKit
 import BackgroundTasks
 import CoreData
 import SwiftUI
+import os
 
 @available(iOS 26.0, *)
 class AppDelegate: UIResponder, UIApplicationDelegate, ObservableObject {
@@ -11,7 +12,14 @@ class AppDelegate: UIResponder, UIApplicationDelegate, ObservableObject {
 
     private var currentTask: BGContinuedProcessingTask?
 
-    private var isUserStopped = false
+    /// Flag de parada manual. Lida no laço keep-alive (fila da BGTask) e escrita
+    /// no stop (main) — threads diferentes, então protegida por lock para evitar
+    /// corrida de dados.
+    private let userStoppedLock = OSAllocatedUnfairLock(initialState: false)
+    private var isUserStopped: Bool {
+        get { userStoppedLock.withLock { $0 } }
+        set { userStoppedLock.withLock { $0 = newValue } }
+    }
 
     var persistentContainer = PersistenceController.shared.container
 
@@ -56,9 +64,22 @@ class AppDelegate: UIResponder, UIApplicationDelegate, ObservableObject {
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
         requestNotificationPermission()
-        locationManager.startCollection()
+ 
+        // Força a criação do LocationManagerViewModel (e do seu CLLocationManager)
+        // AGORA, na main thread. CLLocationManager entrega seus callbacks no run
+        // loop da thread em que foi criado; essa thread precisa de run loop ativo
+        // (a main). Se o 1º acesso ao lazy var acontecesse em handleBackgroundCollection
+        // (fila de background da BGTask, sem run loop), didUpdateLocations e
+        // didChangeAuthorization NUNCA disparariam → GPS sempre vazio.
+        // Isto apenas instancia — NÃO inicia coleta nem pede permissão (preserva a
+        // decisão de não auto-iniciar no launch).
+        _ = locationManager
+
+        // NÃO inicia coleta nem GPS automaticamente no launch — a coleta só começa
+        // quando o usuário toca "Iniciar coleta" (submitBackgroundCollection →
+        // handleBackgroundCollection, que dispara locationManager + sensorManager).
+        // Apenas registramos o handler da BGTask aqui.
         registerBackgroundCollection()
-        submitBackgroundCollection()
 
         // Recovery scan (Etapa D): detecta sessões persistidas no Core Data
         // que ainda não foram exportadas (cenário típico: app morto pelo iOS
@@ -137,6 +158,12 @@ class AppDelegate: UIResponder, UIApplicationDelegate, ObservableObject {
             BGContinuedProcessingTask.cancelPreviousPerformRequests(withTarget: appConstants.backgroundTaskIdentifier)
         }
         
+        // (Re)inicia o GPS para ESTA coleta. Crítico: stopBackgroundCollection
+        // chama locationManager.stopCollection() (stopUpdatingLocation) ao parar;
+        // sem reiniciar aqui, a 2ª coleta em diante ficava sem nenhum fix de GPS
+        // (LocationEntity vazio → mapa sem pontos e gráfico sem GPS).
+        locationManager.startCollection()
+
         // Start collecting data
         sensorManager.startCollection()
         
@@ -169,3 +196,4 @@ class AppDelegate: UIResponder, UIApplicationDelegate, ObservableObject {
     }
 }
     
+
