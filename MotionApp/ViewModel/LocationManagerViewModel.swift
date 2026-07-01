@@ -68,16 +68,38 @@ class LocationManagerViewModel: NSObject, CLLocationManagerDelegate {
     }
 
     func startCollection() {
-        // Importante: pedir When In Use antes do Always (regra da Apple).
-        locationManager.requestWhenInUseAuthorization()
-        locationManager.requestAlwaysAuthorization()
-        locationManager.startUpdatingLocation()
+        // CRÍTICO: CLLocationManager precisa ser acionado numa thread com run
+        // loop (main). handleBackgroundCollection roda na fila de background da
+        // BGTask (scheduler.register(..., using: nil)); chamar startUpdatingLocation
+        // de lá NÃO entrega updates (didUpdateLocations nunca dispara) → GPS some.
+        // Por isso forçamos a main thread aqui.
+        runOnMain {
+            print("📍 [GPS] startCollection — authStatus=\(self.locationManager.authorizationStatus.rawValue), mainThread=\(Thread.isMainThread)")
+            // Importante: pedir When In Use antes do Always (regra da Apple).
+            self.locationManager.requestWhenInUseAuthorization()
+            self.locationManager.requestAlwaysAuthorization()
+            self.locationManager.startUpdatingLocation()
+            print("📍 [GPS] startUpdatingLocation() invocado")
+        }
     }
 
     func stopCollection() {
-        locationManager.stopUpdatingLocation()
+        // Mesmo motivo do startCollection: aciona o CLLocationManager na main.
+        runOnMain {
+            self.locationManager.stopUpdatingLocation()
+        }
         // Não há buffer pendente — escrita é imediata por reading.
         // Mantido método porque AppDelegate.stopBackgroundCollection o chama.
+    }
+
+    /// Executa `work` na main thread. Se já estamos na main, roda síncrono para
+    /// preservar a ordem em relação a quem chamou (ex.: stop seguido de export).
+    private func runOnMain(_ work: @escaping () -> Void) {
+        if Thread.isMainThread {
+            work()
+        } else {
+            DispatchQueue.main.async(execute: work)
+        }
     }
 
     // MARK: - CLLocationManagerDelegate
@@ -200,3 +222,4 @@ class LocationManagerViewModel: NSObject, CLLocationManagerDelegate {
         }
     }
 }
+

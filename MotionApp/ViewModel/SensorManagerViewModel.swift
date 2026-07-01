@@ -64,6 +64,12 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
     /// e passar o UUID manualmente.
     private(set) var lastSessionId: UUID?
 
+    /// Sessão que a tela de coleta AO VIVO deve exibir (mapa/gráfico): a coleta
+    /// em andamento se houver uma, senão a última encerrada. Antes a UI usava só
+    /// `lastSessionId`, que durante uma coleta ativa ainda apontava para a sessão
+    /// ANTERIOR — então mapa/gráfico mostravam dados da coleta passada.
+    var displaySessionId: UUID? { currentSessionId ?? lastSessionId }
+
     // MARK: - Tracking de export (Etapa D)
     /// Side-state em UserDefaults com os UUIDs que já tiveram CSV exportado.
     /// Usado para diferenciar "sessão órfã" (existe no Core Data mas nunca foi
@@ -185,6 +191,13 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
         // Por quê: cada coleta é uma sessão isolada. O UUID é gerado aqui (fonte
         // única) e replicado no AppDelegate para o LocationManager consumir.
         let sessionId = UUID()
+
+        // Cada coleta ao vivo começa do zero: descarta janelas/episódios que
+        // sobraram da coleta anterior (ou de uma recuperação). Sem isto, a 2ª
+        // coleta herdava `rawWindowsAccumulator`/`episodes` da 1ª e os episódios
+        // misturavam janelas de sessões diferentes.
+        resetEmbeddings()
+
         currentSessionId = sessionId
         appDelegate?.currentSessionId = sessionId
         print("🎯 Nova sessão de coleta: \(sessionId.uuidString)")
@@ -793,27 +806,28 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
         }
     }
 
-    /// Núcleo do clustering, compartilhado entre a coleta ao vivo
-    /// (`runDailyClustering`) e a recuperação a partir do disco
-    /// (`runClusteringFromStore`). Recebe as janelas CRUAS já snapshotadas
-    /// (11 canais × windowSize, layout T×C row-major) e seus timestamps de
-    /// início. Roda: backfill GPS pré-fix → normalização global → inferência
-    /// TFC por janela → linkage Ward + episódios → publica em @Published.
+    /// Núcleo PURO do clustering, compartilhado entre a coleta ao vivo
+    /// (`clusterRawWindows`) e a recuperação/upload (`clusterStoreDetached`).
+    /// Recebe as janelas CRUAS já snapshotadas (11 canais × windowSize, layout
+    /// T×C row-major) e seus timestamps de início. Roda: backfill GPS pré-fix →
+    /// normalização global → inferência TFC por janela → linkage Ward + episódios
+    /// e DEVOLVE o resultado (não publica em @Published nem toca estado
+    /// compartilhado — só atualiza o texto de progresso `mlStatusMessage`).
     ///
-    /// DEVE rodar numa fila de background (os dois callers já despacham para
+    /// DEVE rodar numa fila de background (os callers já despacham para
     /// `.global(qos: .userInitiated)`); contém I/O de inferência pesado.
-    private func clusterRawWindows(_ rawWindows: [[Float]], timestamps tsSnapshot: [Int64], t: Int) {
+    private func computeEpisodesFromWindows(_ rawWindows: [[Float]],
+                                            timestamps tsSnapshot: [Int64],
+                                            t: Int)
+        -> (episodes: [Episode], labels: [Int], linkageRows: Int)? {
             let W = tsSnapshot.count
 
             guard W >= 2 else {
                 DispatchQueue.main.async {
-                    self.linkageMatrix = []
-                    self.clusterLabels = []
-                    self.episodes = []
                     self.mlStatusMessage = "Janelas insuficientes (\(W)) — colete por mais tempo"
                 }
                 print("[CLUSTERING] Janelas insuficientes (\(W))")
-                return
+                return nil
             }
 
             // 1.5) DIAGNÓSTICO + BACKFILL de janelas pré-fix de GPS.
@@ -879,7 +893,7 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
                     self.mlStatusMessage = "Inferência TFC falhou em \(skipped) janela(s)"
                 }
                 print("[CLUSTERING] Abortado — \(skipped) inferências falharam")
-                return
+                return nil
             }
 
             // Sanity: range dos embeddings depois da normalização correta. Se
@@ -902,13 +916,30 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
             let linkageRowCount = W - t
 
             DispatchQueue.main.async {
-                self.linkageMatrix = [[Float]](repeating: [], count: max(0, linkageRowCount))
-                self.clusterLabels = labels
-                self.episodes = episodes
                 self.mlStatusMessage = "Pronto: \(episodes.count) episódios"
             }
 
             print("[CLUSTERING] Pronto. K=\(t), W=\(W), episódios=\(episodes.count)")
+            return (episodes, labels, linkageRowCount)
+    }
+
+    /// Coleta AO VIVO: roda o núcleo puro e PUBLICA nos @Published do estado vivo
+    /// (mapa/segmentação da home). Mantido com este nome por compat com
+    /// `runDailyClustering`.
+    private func clusterRawWindows(_ rawWindows: [[Float]], timestamps tsSnapshot: [Int64], t: Int) {
+        guard let result = computeEpisodesFromWindows(rawWindows, timestamps: tsSnapshot, t: t) else {
+            DispatchQueue.main.async {
+                self.linkageMatrix = []
+                self.clusterLabels = []
+                self.episodes = []
+            }
+            return
+        }
+        DispatchQueue.main.async {
+            self.linkageMatrix = [[Float]](repeating: [], count: max(0, result.linkageRows))
+            self.clusterLabels = result.labels
+            self.episodes = result.episodes
+        }
     }
 
     // MARK: - Recuperação a partir do disco (reconstrução de janelas)
@@ -1004,17 +1035,20 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
         return (windows, timestamps)
     }
 
-    /// Recupera os episódios de uma sessão persistida: reconstrói as janelas do
-    /// disco, restaura o estado em memória (para os leitores `forSession:` e a
-    /// faixa de episódios funcionarem) e roda o pipeline compartilhado.
+    /// Recuperação/Upload (DETACHED): reconstrói as janelas da sessão a partir do
+    /// disco e computa os episódios SEM tocar nenhum estado compartilhado da
+    /// coleta ao vivo (`episodes`, `rawWindowsAccumulator`, `windowTimestamps`,
+    /// `lastSessionId`, `windowCount`, `clusterLabels`, `linkageMatrix`). Os
+    /// resultados são entregues via `completion` para a tela de recuperação
+    /// guardá-los localmente. É isto que separa de verdade "coleta atual" de
+    /// "coleta de upload": uma não corrompe mais a outra.
     ///
-    /// `completion` é chamado na main queue ao terminar (sucesso ou falha), DEPOIS
-    /// dos publishes de `episodes`/`mlStatusMessage` — a UI usa isso para encerrar
-    /// o spinner sem depender de observar mudança em `episodes.count`.
-    func runClusteringFromStore(sessionId: UUID, t: Int = 8, completion: (() -> Void)? = nil) {
+    /// `completion` roda na main queue (sucesso ou falha).
+    func clusterStoreDetached(sessionId: UUID, t: Int = 8,
+                              completion: @escaping (_ episodes: [Episode], _ labels: [Int]) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else {
-                DispatchQueue.main.async { completion?() }
+                DispatchQueue.main.async { completion([], []) }
                 return
             }
 
@@ -1029,35 +1063,20 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
             }
 
             let W = rebuilt.timestamps.count
-            print("[RECOVERY] Sessão \(sessionId.uuidString.prefix(8))… → \(W) janelas reconstruídas")
+            print("[RECOVERY] Sessão \(sessionId.uuidString.prefix(8))… → \(W) janelas reconstruídas (detached)")
 
-            guard W >= 2 else {
+            guard W >= 2,
+                  let result = self.computeEpisodesFromWindows(rebuilt.windows,
+                                                               timestamps: rebuilt.timestamps,
+                                                               t: t) else {
                 DispatchQueue.main.async {
-                    self.episodes = []
-                    self.clusterLabels = []
-                    self.linkageMatrix = []
-                    self.windowCount = W
                     self.mlStatusMessage = "Janelas insuficientes (\(W)) nesta coleta"
-                    completion?()
+                    completion([], [])
                 }
                 return
             }
 
-            // Restaura o estado em memória para que populateGroupSeries/
-            // gatherEpisodePoints(forSession:) e a UI de segmentação operem sobre
-            // esta sessão recuperada como se fosse a coleta corrente.
-            self.embeddingsLock.lock()
-            self.rawWindowsAccumulator = rebuilt.windows
-            self.windowTimestamps = rebuilt.timestamps
-            self.embeddingsLock.unlock()
-            self.lastSessionId = sessionId
-            DispatchQueue.main.async { self.windowCount = W }
-
-            // clusterRawWindows roda síncrono nesta fila; seus publishes vão para
-            // a main queue. Enfileirar `completion` na main DEPOIS garante que ele
-            // execute após o publish final de `episodes`.
-            self.clusterRawWindows(rebuilt.windows, timestamps: rebuilt.timestamps, t: t)
-            DispatchQueue.main.async { completion?() }
+            DispatchQueue.main.async { completion(result.episodes, result.labels) }
         }
     }
 
@@ -1166,7 +1185,8 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
                 // (N <= target), window = 1 → vira identidade. A média de janela
                 // é linear, então comuta com o z-score (afim por canal) e com a
                 // média entre canais — a ordem aqui não altera o resultado.
-                let window = max(1, N / target)
+//                let window = max(1, N / target)
+                let window = 1
 
                 var accSamples: [SensorGroupSample] = []
                 var gyroSamples: [SensorGroupSample] = []
@@ -1313,8 +1333,8 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
     // (evita travar a UI). Retorna pontos prontos para serem passados ao
     // EpisodesMapView.
 
-    func gatherEpisodePoints(forSession sessionId: UUID) async -> [EpisodePoint] {
-        let episodesSnapshot: [Episode] = await MainActor.run { self.episodes }
+    func gatherEpisodePoints(forSession sessionId: UUID, episodes: [Episode]) async -> [EpisodePoint] {
+        let episodesSnapshot: [Episode] = episodes
         guard !episodesSnapshot.isEmpty else { return [] }
 
         return await withCheckedContinuation { continuation in
@@ -1973,4 +1993,5 @@ final class SensorManagerViewModel: NSObject, ObservableObject {
         }
     }
 }
+
 

@@ -8,16 +8,29 @@ struct ContentView: View {
     @ObservedObject var sensorManager: SensorManagerViewModel
     @Environment(\.managedObjectContext) private var context
     @StateObject private var labelStore = EpisodeLabelStore()
-    @State private var isUserStopped = false
 
     /// Onboarding "How to use this app" — exibido só no primeiro uso.
     @AppStorage("hasSeenOnboarding") private var hasSeenOnboarding = false
     @State private var showOnboarding = false
     @State private var csvURL: URL?
     @State private var combinedCSVURL: URL?  // Novo: URL para CSV combinado
+
+    /// Início da coleta atual. Reiniciado a cada "Iniciar coleta".
     @State private var startTime = Date()
+    /// Instante em que a coleta foi parada. Enquanto não-nil, congela o contador
+    /// de Duração no valor final; volta a nil ao iniciar uma nova coleta.
+    @State private var stopTime: Date?
     private let appConstants = AppConstants()
     private let utils = Utils()
+
+    /// Duração exibida: ao vivo enquanto grava, congelada após parar, 0 antes da
+    /// 1ª coleta. Deriva de `sensorManager.isRecording` (fonte única de verdade),
+    /// então fica correta mesmo quando o sistema encerra a coleta sozinho.
+    private var collectionDuration: TimeInterval {
+        if sensorManager.isRecording { return Date().timeIntervalSince(startTime) }
+        if let stopTime { return stopTime.timeIntervalSince(startTime) }
+        return 0
+    }
     
     // Default K = 10. O Stepper em SegmentationCardView clampa automaticamente
     // ao range válido [2, min(W, 30)] sempre que `windowCount` mudar.
@@ -35,7 +48,7 @@ struct ContentView: View {
                 VStack(spacing: 16) {
                     // Top metrics
                     HStack(spacing: 12) {
-                        MetricCard(title: "Duração", value: "\(String(format: "%.2f", Date().timeIntervalSince(startTime))) s")
+                        MetricCard(title: "Duração", value: "\(String(format: "%.2f", collectionDuration)) s")
                             .accessibilityIdentifier("DurationTimerLabel")
                         MetricCard(title: "Bateria", value: "\(Int(sensorManager.batteryLevel * 100))%")
                     }
@@ -57,25 +70,33 @@ struct ContentView: View {
                     // Actions
                     VStack(spacing: 8) {
                         Button {
-                            isUserStopped.toggle()
-                            if isUserStopped {
+                            // Estado do botão deriva de `sensorManager.isRecording`
+                            // (fonte única de verdade) — assim ele fica correto
+                            // mesmo se o sistema encerrar a coleta sozinho.
+                            if sensorManager.isRecording {
                                 // Ordem importa (mudou na Etapa C): primeiro pedimos o stop —
                                 // que faz flush SÍNCRONO do writeContext — para depois exportar
                                 // lendo do disco. Sem essa ordem, o export perderia o último
                                 // batch parcial (< saveThreshold amostras).
+                                stopTime = Date()
                                 sensorManager.requestStopBackgroundCollection()
                                 combinedCSVURL = sensorManager.exportCombinedDataToCSV()
                             } else {
+                                // Nova coleta: reinicia o cronômetro do zero e some
+                                // com o link de export da coleta anterior.
+                                startTime = Date()
+                                stopTime = nil
+                                combinedCSVURL = nil
                                 sensorManager.submitBackgroundCollection()
                             }
                         } label: {
-                            Label(isUserStopped ? "Iniciar coleta" : "Parar coleta",
-                                  systemImage: isUserStopped ? "play.fill" : "stop.fill")
+                            Label(sensorManager.isRecording ? "Parar coleta" : "Iniciar coleta",
+                                  systemImage: sensorManager.isRecording ? "stop.fill" : "play.fill")
                             .font(.headline)
                             .frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.borderedProminent)
-                        .tint(isUserStopped ? .blue : .red)
+                        .tint(sensorManager.isRecording ? .red : .blue)
                         .controlSize(.large)
                         .accessibilityIdentifier("StartStopButton")
                         
@@ -91,6 +112,12 @@ struct ContentView: View {
                 .padding()
             }
             .navigationTitle("Move Collector")
+            .onChange(of: sensorManager.isRecording) { _, recording in
+                // Congela a Duração quando a coleta termina por QUALQUER caminho —
+                // inclusive expiração da BGTask pelo sistema, em que o botão não
+                // foi tocado. O guard evita sobrescrever o stopTime do stop manual.
+                if !recording && stopTime == nil { stopTime = Date() }
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
@@ -150,5 +177,6 @@ struct ContentView: View {
         // Fallback on earlier versions
     }
 }
+
 
 

@@ -145,8 +145,9 @@ struct SegmentationCardView: View {
 
                 Button {
                     Task {
-                        if let sid = sensorManager.lastSessionId {
-                            let points = await sensorManager.gatherEpisodePoints(forSession: sid)
+                        if let sid = sensorManager.displaySessionId {
+                            let points = await sensorManager.gatherEpisodePoints(
+                                forSession: sid, episodes: sensorManager.episodes)
                             if !points.isEmpty {
                                 mapData = MapEpisodesData(points: points)
                             }
@@ -160,7 +161,7 @@ struct SegmentationCardView: View {
 
                 Button {
                     Task {
-                        if let sid = sensorManager.lastSessionId {
+                        if let sid = sensorManager.displaySessionId {
                             let series = await sensorManager.populateGroupSeries(forSession: sid)
                             combinedData = CombinedSensorsData(series: series)
                         }
@@ -248,4 +249,5 @@ struct SegmentationCardView: View {
         return "\(h) h \(m) min"
     }
 }
+
 
