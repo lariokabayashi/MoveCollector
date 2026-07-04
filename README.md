@@ -1,6 +1,6 @@
 # MoveCollector
 
-App para Projeto Final de Graduação.
+App for Undergraduate final project (PFG).
 
 ## Overview
 
