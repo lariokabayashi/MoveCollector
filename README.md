@@ -2,6 +2,8 @@
 
 App for Undergraduate final project (PFG)
 
+![MoveCollector](banner.png)
+
 ## Overview
 
 MoveCollector (`MotionApp`) is an iOS app for **continuous collection and analysis of motion sensor data**. It records data from the device's accelerometer, gyroscope, and GPS in real time — including in the background — and processes it on-device to segment activity into movement "episodes".
