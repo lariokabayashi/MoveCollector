@@ -14,7 +14,6 @@ Main features:
 - **Audio labeling** — record a short voice note per episode; on-device speech recognition suggests a label automatically.
 - **CSV export** — export raw and combined sensor sessions for offline analysis.
 - **Session recovery** — recover collections persisted to disk (e.g. after a background task ends).
-- **Built-in benchmarks** — latency, memory, and battery benchmarks used for the thesis evaluation.
 
 Data is persisted locally with Core Data.
 
