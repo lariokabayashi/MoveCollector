@@ -88,7 +88,9 @@ class AppDelegate: UIResponder, UIApplicationDelegate, ObservableObject {
         // Por quê DEPOIS de submitBackgroundCollection: o submit não toca em
         // Core Data; é só agendar BG task. Ordem não tem efeito prático.
         _ = sensorManager.reportOrphanedSessionsOnLaunch()
-
+        
+        application.windows.forEach { $0.overrideUserInterfaceStyle = .dark }
+        
         return true
     }
     
