@@ -66,18 +66,8 @@ class AppDelegate: UIResponder, UIApplicationDelegate, ObservableObject {
         requestNotificationPermission()
  
         // Força a criação do LocationManagerViewModel (e do seu CLLocationManager)
-        // AGORA, na main thread. CLLocationManager entrega seus callbacks no run
-        // loop da thread em que foi criado; essa thread precisa de run loop ativo
-        // (a main). Se o 1º acesso ao lazy var acontecesse em handleBackgroundCollection
-        // (fila de background da BGTask, sem run loop), didUpdateLocations e
-        // didChangeAuthorization NUNCA disparariam → GPS sempre vazio.
-        // Isto apenas instancia — NÃO inicia coleta nem pede permissão (preserva a
-        // decisão de não auto-iniciar no launch).
         _ = locationManager
 
-        // NÃO inicia coleta nem GPS automaticamente no launch — a coleta só começa
-        // quando o usuário toca "Iniciar coleta" (submitBackgroundCollection →
-        // handleBackgroundCollection, que dispara locationManager + sensorManager).
         // Apenas registramos o handler da BGTask aqui.
         registerBackgroundCollection()
 
@@ -88,8 +78,6 @@ class AppDelegate: UIResponder, UIApplicationDelegate, ObservableObject {
         // Por quê DEPOIS de submitBackgroundCollection: o submit não toca em
         // Core Data; é só agendar BG task. Ordem não tem efeito prático.
         _ = sensorManager.reportOrphanedSessionsOnLaunch()
-        
-        application.windows.forEach { $0.overrideUserInterfaceStyle = .dark }
         
         return true
     }
@@ -160,10 +148,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate, ObservableObject {
             BGContinuedProcessingTask.cancelPreviousPerformRequests(withTarget: appConstants.backgroundTaskIdentifier)
         }
         
-        // (Re)inicia o GPS para ESTA coleta. Crítico: stopBackgroundCollection
-        // chama locationManager.stopCollection() (stopUpdatingLocation) ao parar;
-        // sem reiniciar aqui, a 2ª coleta em diante ficava sem nenhum fix de GPS
-        // (LocationEntity vazio → mapa sem pontos e gráfico sem GPS).
+        // (Re)inicia o GPS para ESTA coleta.
         locationManager.startCollection()
 
         // Start collecting data
@@ -197,5 +182,3 @@ class AppDelegate: UIResponder, UIApplicationDelegate, ObservableObject {
         BGContinuedProcessingTask.cancelPreviousPerformRequests(withTarget: appConstants.backgroundTaskIdentifier)
     }
 }
-    
-

@@ -19,7 +19,7 @@ struct MotionAppApp: App {
         WindowGroup {
             ContentView(sensorManager: appDelegate.sensorManager)
                 .environment(\.managedObjectContext, persistenceController.container.viewContext)
-                .preferredColorScheme(.light)
+                .preferredColorScheme(.dark)
         }
     }
 }
