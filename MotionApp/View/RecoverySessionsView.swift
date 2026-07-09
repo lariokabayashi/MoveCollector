@@ -44,6 +44,8 @@ struct RecoverySessionsView: View {
     var body: some View {
         NavigationStack(path: $path) {
             content
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color.appBackground.ignoresSafeArea())
                 .navigationTitle("Recuperar coletas")
                 .navigationDestination(for: SensorManagerViewModel.SessionSummary.self) { s in
                     RecoverySessionDetailView(sensorManager: sensorManager, summary: s)
@@ -107,8 +109,10 @@ struct RecoverySessionsView: View {
             } actions: {
                 Button { showImporter = true } label: {
                     Label("Fazer upload de CSV", systemImage: "square.and.arrow.down")
+                        .foregroundStyle(Color.onAccent)
                 }
                 .buttonStyle(.borderedProminent)
+                .tint(.brandLime)
                 .disabled(isImporting)
             }
         } else {
@@ -117,11 +121,14 @@ struct RecoverySessionsView: View {
                     ForEach(sessions) { s in
                         NavigationLink(value: s) { row(for: s) }
                     }
+                    .listRowBackground(Color.cardSurface)
                 } footer: {
                     Text("Toque numa coleta para computar episódios, ver no mapa, "
                          + "abrir o gráfico de sensores ou exportar.")
                 }
             }
+            .scrollContentBackground(.hidden)
+            .background(Color.appBackground.ignoresSafeArea())
         }
     }
 
@@ -148,7 +155,7 @@ struct RecoverySessionsView: View {
                 Spacer()
                 if s.isExported {
                     Label("CSV", systemImage: "checkmark.circle.fill")
-                        .font(.caption2).foregroundStyle(.green)
+                        .font(.caption2).foregroundStyle(Color.brandGreen)
                 }
             }
             Text("\(RecoveryFormat.duration(s.durationSec)) · \(s.rowCount) amostras")
@@ -258,7 +265,7 @@ struct RecoverySessionDetailView: View {
                 }
                 if episodesReady {
                     Text("\(recoveredEpisodes.count) episódios prontos")
-                        .font(.caption).foregroundStyle(.green)
+                        .font(.caption).foregroundStyle(Color.brandGreen)
                 }
             }
 
@@ -301,6 +308,8 @@ struct RecoverySessionDetailView: View {
                 }
             }
         }
+        .scrollContentBackground(.hidden)
+        .background(Color.appBackground.ignoresSafeArea())
         .navigationTitle("Coleta \(summary.id.uuidString.prefix(6))")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { targetEpisodes = min(targetEpisodes, max(2, maxK)) }

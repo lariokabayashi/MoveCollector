@@ -30,8 +30,6 @@ struct SensorCard: View {
                 .foregroundStyle(.tertiary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding()
-        .background(RoundedRectangle(cornerRadius: 16).fill(.background))
-        .shadow(color: .black.opacity(0.08), radius: 8, x: 0, y: 4)
+        .cardStyle()
     }
 }

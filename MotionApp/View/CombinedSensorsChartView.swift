@@ -68,8 +68,8 @@ struct CombinedSensorsChartView: View {
     /// as magnitudes já são comparáveis; cada painel ainda tem seu eixo Y próprio.
     private func color(for name: String) -> Color {
         switch name {
-        case "Accelerometer":  return .blue
-        case "Gyroscope":      return .green
+        case "Accelerometer":  return .brandBlue
+        case "Gyroscope":      return .brandGreen
         case "GPS":            return .orange
         default:               return .primary
         }

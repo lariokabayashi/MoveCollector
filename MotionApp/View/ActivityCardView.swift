@@ -15,7 +15,7 @@ struct ActivityCard: View {
         HStack(spacing: 12) {
             Image(systemName: activityIcon(for: activity))
                 .font(.title2)
-                .foregroundStyle(.blue)
+                .foregroundStyle(Color.brandBlue)
             VStack(alignment: .leading, spacing: 2) {
                 Text("Atividade prevista")
                     .font(.caption)
@@ -25,9 +25,7 @@ struct ActivityCard: View {
             }
             Spacer()
         }
-        .padding()
-        .background(RoundedRectangle(cornerRadius: 16).fill(.background))
-        .shadow(color: .black.opacity(0.08), radius: 8, x: 0, y: 4)
+        .cardStyle()
     }
 
     private func activityIcon(for activity: String) -> String {

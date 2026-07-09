@@ -94,9 +94,10 @@ struct ContentView: View {
                                   systemImage: sensorManager.isRecording ? "stop.fill" : "play.fill")
                             .font(.headline)
                             .frame(maxWidth: .infinity)
+                            .foregroundStyle(sensorManager.isRecording ? Color.white : Color.onAccent)
                         }
                         .buttonStyle(.borderedProminent)
-                        .tint(sensorManager.isRecording ? .red : .blue)
+                        .tint(sensorManager.isRecording ? .brandRed : .brandLime)
                         .controlSize(.large)
                         .accessibilityIdentifier("StartStopButton")
                         
@@ -106,11 +107,13 @@ struct ContentView: View {
                                     .font(.subheadline)
                             }
                             .buttonStyle(.bordered)
+                            .tint(.brandBlue)
                         }
                     }
                 }
                 .padding()
             }
+            .background(Color.appBackground.ignoresSafeArea())
             .navigationTitle("Move Collector")
             .onChange(of: sensorManager.isRecording) { _, recording in
                 // Congela a Duração quando a coleta termina por QUALQUER caminho —
@@ -172,7 +175,7 @@ struct ContentView: View {
     if #available(iOS 26.0, *) {
         ContentView(sensorManager: AppDelegate().sensorManager)
             .environment(\.managedObjectContext, PersistenceController.shared.container.viewContext)
-            .preferredColorScheme(.light)
+            .preferredColorScheme(.dark)
     } else {
         // Fallback on earlier versions
     }

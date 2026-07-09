@@ -60,3 +60,38 @@ fastlane/report.xml
 fastlane/Preview.html
 fastlane/screenshots/**/*.png
 fastlane/test_output
+
+# macOS
+.DS_Store
+
+# Python / virtualenv
+.venv/
+__pycache__/
+*.pyc
+
+# ML / experiment artifacts
+lightning_logs/
+result/
+code/
+
+# Xcode build output
+build/
+
+# Logs
+*.log
+
+# Local scripts / data / notebooks
+run_local.py
+run_cell35.py
+cps->sp.csv
+exemplo_refactored (1).ipynb
+
+# Research / report assets
+MC030/
+MC030---V2/
+
+# App files kept out of the repo
+MotionApp/Benchmark/
+MotionApp/Model/EpisodeSimilarity.swift
+MotionApp/Model/NotesStore.swift
+MotionApp/View/QuickNoteCard.swift

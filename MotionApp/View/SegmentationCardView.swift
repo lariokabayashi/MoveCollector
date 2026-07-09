@@ -78,6 +78,7 @@ struct SegmentationCardView: View {
                     sensorManager.runDailyClustering(t: k)
                 }
                 .buttonStyle(.bordered)
+                .tint(.brandBlue)
                 .controlSize(.small)
                 .disabled(!canProcess)
             }
@@ -157,6 +158,7 @@ struct SegmentationCardView: View {
                     Label("Abrir mapa de episódios", systemImage: "map")
                 }
                 .buttonStyle(.bordered)
+                .tint(.brandBlue)
                 .controlSize(.small)
 
                 Button {
@@ -170,6 +172,7 @@ struct SegmentationCardView: View {
                     Label("Abrir gráfico de sensores combinados", systemImage: "chart.xyaxis.line")
                 }
                 .buttonStyle(.bordered)
+                .tint(.brandBlue)
                 .controlSize(.small)
             }
 
@@ -180,9 +183,7 @@ struct SegmentationCardView: View {
             }
         }
         .frame(maxWidth: .infinity)
-        .padding()
-        .background(RoundedRectangle(cornerRadius: 16).fill(.background))
-        .shadow(color: .black.opacity(0.08), radius: 8, x: 0, y: 4)
+        .cardStyle()
         .onChange(of: W) { _, newW in
             // Se o usuário tinha pedido K > maxK quando havia mais janelas
             // e agora o cap caiu (reset ou nova coleta), aperta o valor pra
@@ -215,7 +216,7 @@ struct SegmentationCardView: View {
         HStack(spacing: 6) {
             Image(systemName: W >= 2 ? "checkmark.circle" : "clock")
                 .font(.caption)
-                .foregroundStyle(W >= 2 ? .green : .secondary)
+                .foregroundStyle(W >= 2 ? Color.brandGreen : Color.secondary)
             Group {
                 if W == 0 {
                     Text("Aguardando 1ª janela (≥ 15 s)")

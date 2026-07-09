@@ -41,8 +41,7 @@ struct EpisodeAudioLabelView: View {
                         .font(.headline.monospacedDigit())
                 }
                 .frame(maxWidth: .infinity)
-                .padding()
-                .background(RoundedRectangle(cornerRadius: 16).fill(Color(.secondarySystemBackground)))
+                .cardStyle()
 
                 recordButton
 
@@ -92,12 +91,12 @@ struct EpisodeAudioLabelView: View {
         } label: {
             ZStack {
                 Circle()
-                    .fill(recorder.isRecording ? Color.red : Color.accentColor)
+                    .fill(recorder.isRecording ? Color.brandRed : Color.brandLime)
                     .frame(width: 96, height: 96)
-                    .shadow(color: .black.opacity(0.15), radius: 8, y: 4)
+                    .shadow(color: .black.opacity(0.35), radius: 8, y: 4)
                 Image(systemName: recorder.isRecording ? "stop.fill" : "mic.fill")
                     .font(.system(size: 36, weight: .bold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(recorder.isRecording ? Color.white : Color.onAccent)
             }
         }
         .buttonStyle(.plain)
@@ -114,7 +113,7 @@ struct EpisodeAudioLabelView: View {
         case .recording:
             Label("Gravando… toque para parar", systemImage: "waveform")
                 .font(.footnote)
-                .foregroundStyle(.red)
+                .foregroundStyle(Color.brandRed)
         case .transcribing:
             HStack(spacing: 8) {
                 ProgressView()
@@ -125,16 +124,16 @@ struct EpisodeAudioLabelView: View {
         case .finished:
             Label("Transcrição pronta — ajuste o texto se quiser", systemImage: "checkmark.circle")
                 .font(.footnote)
-                .foregroundStyle(.green)
+                .foregroundStyle(Color.brandGreen)
         case .denied:
             Text("Permissão de microfone negada. Habilite em Ajustes.")
                 .font(.footnote)
-                .foregroundStyle(.orange)
+                .foregroundStyle(Color.brandRed)
                 .multilineTextAlignment(.center)
         case .failed(let message):
             Text(message)
                 .font(.footnote)
-                .foregroundStyle(.orange)
+                .foregroundStyle(Color.brandRed)
                 .multilineTextAlignment(.center)
         }
     }

@@ -23,10 +23,12 @@ import SwiftUI
 /// `EpisodeBuilder.getStartEndLabel`. Mantido sem `@available` para poder ser
 /// usado por views com e sem anotação de versão.
 enum EpisodeColorPalette {
+    // Sequencia liderada pelas cores da marca e SEM `.black` (que ficava
+    // invisivel no dark mode). Todas as entradas sao legiveis sobre fundo escuro.
     static let colors: [Color] = [
-        .red, .blue, .green, .purple, .orange,
-        .pink, .black, .yellow, .indigo, .teal,
-        .gray, .brown, .mint, .cyan,
+        .brandLime, .brandBlue, .brandGreen, .brandRed, .orange,
+        .pink, .cyan, .yellow, .indigo, .teal,
+        .mint, .brown, .purple, .white,
     ]
 
     static func color(for label: Int) -> Color {

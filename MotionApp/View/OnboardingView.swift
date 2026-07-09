@@ -72,11 +72,13 @@ struct OnboardingView: View {
                 Text(page < pages.count - 1 ? "Continuar" : "Começar")
                     .font(.headline)
                     .frame(maxWidth: .infinity)
+                    .foregroundStyle(Color.onAccent)
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
             .padding()
         }
+        .background(Color.appBackground.ignoresSafeArea())
     }
 
     @ViewBuilder
