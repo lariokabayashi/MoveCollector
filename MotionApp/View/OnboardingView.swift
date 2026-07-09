@@ -47,13 +47,13 @@ struct OnboardingView: View {
 
     var body: some View {
         ZStack{
-            Image("background-dark-mode")
+            Image("Wireframes")
                 .resizable()
                 .aspectRatio(contentMode: .fill)
                 .frame(minWidth: 0, maxWidth: .infinity)
                 .edgesIgnoringSafeArea(.all)
-                .opacity(0.5)
-                .blur(radius: 2, opaque: true)
+                .padding()
+                .overlay(Color.appBackground.opacity(0.7))
             VStack {
                 HStack {
                     Spacer()
@@ -79,6 +79,7 @@ struct OnboardingView: View {
                 } label: {
                     Text(page < pages.count - 1 ? "Continuar" : "Começar")
                         .font(.headline)
+                        .foregroundStyle(.black)
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)

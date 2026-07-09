@@ -110,7 +110,13 @@ struct ContentView: View {
                 }
                 .padding()
             }
-            .background(Color.appBackground.ignoresSafeArea())
+            .background {
+                Image("Wireframes")
+                    .resizable()
+                    .scaledToFill()          // preenche a tela, corta o excesso
+                    .overlay(Color.appBackground.opacity(0.7)) // scrim p/ legibilidade
+                    .ignoresSafeArea()
+            }
             .navigationTitle("Move Collector")
             .onChange(of: sensorManager.isRecording) { _, recording in
                 // Congela a Duração quando a coleta termina por QUALQUER caminho —
