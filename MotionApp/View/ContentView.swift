@@ -35,10 +35,7 @@ struct ContentView: View {
     // Default K = 10. O Stepper em SegmentationCardView clampa automaticamente
     // ao range válido [2, min(W, 30)] sempre que `windowCount` mudar.
     @State private var targetEpisodes = 10
-
-    /// Painel de benchmarks (avaliação de performance da tese).
-    @State private var showBenchmarks = false
-
+    
     /// Tela de recuperação de coletas persistidas (ex.: após BGTask terminado).
     @State private var showRecovery = false
     
@@ -130,14 +127,6 @@ struct ContentView: View {
                     }
                     .accessibilityIdentifier("OpenOnboardingButton")
                 }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        showBenchmarks = true
-                    } label: {
-                        Image(systemName: "stopwatch")
-                    }
-                    .accessibilityIdentifier("OpenBenchmarksButton")
-                }
                 ToolbarItem(placement: .topBarLeading) {
                     Button {
                         showRecovery = true
@@ -147,9 +136,6 @@ struct ContentView: View {
                     .accessibilityIdentifier("OpenRecoveryButton")
                 }
             }
-//            .sheet(isPresented: $showBenchmarks) {
-//                BenchmarkView(sensorManager: sensorManager)
-//            }
             .sheet(isPresented: $showRecovery) {
                 RecoverySessionsView(sensorManager: sensorManager)
             }

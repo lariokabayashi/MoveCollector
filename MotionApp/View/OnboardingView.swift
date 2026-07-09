@@ -46,37 +46,45 @@ struct OnboardingView: View {
     ]
 
     var body: some View {
-        VStack {
-            HStack {
-                Spacer()
-                Button("Pular") { onFinish() }
-                    .font(.subheadline)
-                    .padding()
-            }
-
-            TabView(selection: $page) {
-                ForEach(pages.indices, id: \.self) { index in
-                    pageView(pages[index])
-                        .tag(index)
+        ZStack{
+            Image("background-dark-mode")
+                .resizable()
+                .aspectRatio(contentMode: .fill)
+                .frame(minWidth: 0, maxWidth: .infinity)
+                .edgesIgnoringSafeArea(.all)
+                .opacity(0.5)
+                .blur(radius: 2, opaque: true)
+            VStack {
+                HStack {
+                    Spacer()
+                    Button("Pular") { onFinish() }
+                        .font(.subheadline)
+                        .padding()
                 }
-            }
-            .tabViewStyle(.page(indexDisplayMode: .always))
-
-            Button {
-                if page < pages.count - 1 {
-                    withAnimation { page += 1 }
-                } else {
-                    onFinish()
+                
+                TabView(selection: $page) {
+                    ForEach(pages.indices, id: \.self) { index in
+                        pageView(pages[index])
+                            .tag(index)
+                    }
                 }
-            } label: {
-                Text(page < pages.count - 1 ? "Continuar" : "Começar")
-                    .font(.headline)
-                    .frame(maxWidth: .infinity)
-                    .foregroundStyle(Color.onAccent)
+                .tabViewStyle(.page(indexDisplayMode: .always))
+                
+                Button {
+                    if page < pages.count - 1 {
+                        withAnimation { page += 1 }
+                    } else {
+                        onFinish()
+                    }
+                } label: {
+                    Text(page < pages.count - 1 ? "Continuar" : "Começar")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .padding()
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .padding()
         }
         .background(Color.appBackground.ignoresSafeArea())
     }
@@ -113,4 +121,3 @@ private struct OnboardingPage {
 #Preview {
     OnboardingView(onFinish: {})
 }
-
