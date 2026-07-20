@@ -32,6 +32,15 @@ The app requests the following device permissions at runtime:
 - **Microphone** — recording voice notes to label episodes
 - **Speech Recognition** — on-device transcription of voice notes
 
+## Try the beta (TestFlight)
+
+Want to test MoveCollector on your own device? Join the public beta via TestFlight:
+
+**[Join the MoveCollector beta →](https://testflight.apple.com/join/xve6nh1q)**
+
+1. Install [TestFlight](https://apps.apple.com/app/testflight/id899247664) on your iPhone, iPad, or Mac.
+2. Open the link above on your device and tap **Accept**, then **Install**.
+
 ## Running the app
 
 1. Clone the repository:
